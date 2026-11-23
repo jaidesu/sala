@@ -103,7 +103,9 @@ mod tests {
         let (mut a, mut b) = tokio::io::duplex(1024 * 1024);
         write_frame(&mut a, b"ola").await.unwrap();
         write_frame(&mut a, b"").await.unwrap();
-        write_frame(&mut a, &vec![7u8; MAX_FRAME_LEN]).await.unwrap();
+        write_frame(&mut a, &vec![7u8; MAX_FRAME_LEN])
+            .await
+            .unwrap();
 
         assert_eq!(read_frame(&mut b).await.unwrap(), b"ola");
         assert_eq!(read_frame(&mut b).await.unwrap(), b"");

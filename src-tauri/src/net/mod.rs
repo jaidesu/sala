@@ -114,9 +114,7 @@ mod tests {
         use tokio::sync::mpsc;
         use tokio::time::timeout;
 
-        use super::super::{
-            NetEvent, PathKind, endpoint::NetMode, guest::Guest, host::Host,
-        };
+        use super::super::{NetEvent, PathKind, endpoint::NetMode, guest::Guest, host::Host};
         use crate::room::invite::{Invite, RoomId};
 
         const LIMITE: std::time::Duration = std::time::Duration::from_secs(30);

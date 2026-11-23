@@ -88,10 +88,7 @@ impl Guest {
             .map_err(|_| anyhow!(CONNECT_FAILED))?;
 
         // 2. Stream bidirecional onde vão todas as mensagens.
-        let (mut send, mut recv) = conn
-            .open_bi()
-            .await
-            .map_err(|_| anyhow!(CONNECT_FAILED))?;
+        let (mut send, mut recv) = conn.open_bi().await.map_err(|_| anyhow!(CONNECT_FAILED))?;
 
         // 3. Hello: dizemos qual sala queremos e qual versão falamos.
         send_msg(

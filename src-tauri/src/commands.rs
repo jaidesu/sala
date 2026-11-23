@@ -124,7 +124,9 @@ pub async fn guest_join(
 #[tauri::command]
 pub async fn guest_ping(state: State<'_, NetState>) -> Result<PingResult, String> {
     let mut slot = state.guest.lock().await;
-    let guest = slot.as_mut().ok_or("Você não está conectado a nenhuma sala.")?;
+    let guest = slot
+        .as_mut()
+        .ok_or("Você não está conectado a nenhuma sala.")?;
     guest.ping().await.map_err(|e| e.to_string())
 }
 

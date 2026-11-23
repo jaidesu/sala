@@ -102,14 +102,9 @@ async fn serve_guest(conn: Connection, room_id: RoomId, events: UnboundedSender<
 
     // Responde pings até o Convidado sair. Qualquer erro aqui significa que a
     // conexão acabou (saída normal, queda de rede ou mensagem inválida).
-    loop {
-        match recv_msg::<_, Message>(&mut recv).await {
-            Ok(Message::Ping { seq }) => {
-                if send_msg(&mut send, &Message::Pong { seq }).await.is_err() {
-                    break;
-                }
-            }
-            Ok(_) | Err(_) => break,
+    while let Ok(Message::Ping { seq }) = recv_msg::<_, Message>(&mut recv).await {
+        if send_msg(&mut send, &Message::Pong { seq }).await.is_err() {
+            break;
         }
     }
 
@@ -132,7 +127,10 @@ async fn handshake(
         .map_err(|_| anyhow!("Convidado não mandou Hello a tempo"))??;
 
     match hello {
-        Message::Hello { version, room_id: r } if version == PROTOCOL_VERSION && r == room_id => {}
+        Message::Hello {
+            version,
+            room_id: r,
+        } if version == PROTOCOL_VERSION && r == room_id => {}
         _ => bail!("Hello inválido"),
     }
 

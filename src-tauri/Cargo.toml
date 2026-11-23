@@ -19,6 +19,18 @@ tauri-build = { version = "2.7", features = [] }
 tauri = { version = "2.12", features = [] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# Rede P2P: conexões QUIC diretas (hole punching) com fallback por relay.
+iroh = "1.5"
+# Runtime assíncrono (o mesmo que o Tauri e o iroh usam por baixo).
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time", "sync", "io-util"] }
+# Utilidades de streams usadas pelo iroh (`StreamExt::next`).
+n0-future = "0.3"
+# Erros com mensagem e contexto, sem precisar criar um tipo para cada caso.
+anyhow = "1"
+# Codifica o convite como texto copiável.
+base64 = "0.23"
+# Números aleatórios do sistema operacional (para o identificador da sala).
+getrandom = "0.4"
 
 # Perfil de release otimizado para binário pequeno.
 # Veja: https://tauri.app/concept/size/#cargo-configuration

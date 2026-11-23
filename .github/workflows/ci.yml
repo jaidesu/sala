@@ -53,10 +53,6 @@ jobs:
       - name: Compilar interface
         run: npm run build
 
-      - name: Formatação (cargo fmt)
-        working-directory: src-tauri
-        run: cargo fmt --check
-
       - name: Lints (cargo clippy)
         working-directory: src-tauri
         run: cargo clippy --all-targets -- -D warnings
@@ -64,6 +60,13 @@ jobs:
       - name: Testes (cargo test)
         working-directory: src-tauri
         run: cargo test
+
+      # Roda mesmo se algo acima falhar, para uma execução mostrar todos os
+      # problemas de uma vez (formatação mostra o diff do que mudar).
+      - name: Formatação (cargo fmt)
+        if: always()
+        working-directory: src-tauri
+        run: cargo fmt --check
 
       # Enquanto não há compilador Rust na máquina de desenvolvimento, o
       # Cargo.lock (versões exatas das dependências) é gerado aqui.

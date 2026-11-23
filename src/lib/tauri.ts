@@ -1,11 +1,13 @@
 /**
  * Ponte tipada entre a interface e o núcleo Rust.
  *
- * Regra do projeto: nenhum componente chama `invoke` diretamente. Tudo passa
- * por aqui, para que os nomes dos comandos e os tipos fiquem num lugar só.
- * Os tipos abaixo precisam bater com os structs do Rust (src-tauri/src/commands.rs).
+ * Regra do projeto: nenhum componente chama `invoke`/`listen` diretamente.
+ * Tudo passa por aqui, para que os nomes dos comandos e os tipos fiquem num
+ * lugar só. Os tipos abaixo precisam bater com os do Rust
+ * (src-tauri/src/commands.rs e src-tauri/src/net/).
  */
 import { invoke, isTauri } from "@tauri-apps/api/core";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
 /** Espelho do struct `AppInfo` do Rust (campos em camelCase). */
 export interface AppInfo {
@@ -13,6 +15,25 @@ export interface AppInfo {
   version: string;
   protocolVersion: number;
 }
+
+/** `NetMode` do Rust: internet (com relay) ou só rede local. */
+export type NetMode = "internet" | "localOnly";
+
+/** `PathKind` do Rust: por onde os dados estão passando. */
+export type PathKind = "direct" | "relay" | "unknown";
+
+/** `PingResult` do Rust. */
+export interface PingResult {
+  rttMs: number;
+  path: PathKind;
+}
+
+/** `NetEvent` do Rust (o campo `kind` diz qual é). */
+export type NetEvent =
+  | { kind: "guestConnected"; guest: string }
+  | { kind: "guestDisconnected"; guest: string }
+  | { kind: "pathChanged"; path: PathKind }
+  | { kind: "disconnected" };
 
 /**
  * `true` quando a página está rodando dentro do app Tauri.
@@ -25,4 +46,41 @@ export const runningInTauri = isTauri();
 export async function getAppInfo(): Promise<AppInfo | null> {
   if (!runningInTauri) return null;
   return invoke<AppInfo>("app_info");
+}
+
+/** Abre uma sala e devolve o convite. */
+export function hostStart(mode: NetMode): Promise<string> {
+  return invoke<string>("host_start", { mode });
+}
+
+/** Fecha a sala. */
+export function hostStop(): Promise<void> {
+  return invoke("host_stop");
+}
+
+/** Entra na sala do convite. Devolve o caminho inicial. */
+export function guestJoin(invite: string, mode: NetMode): Promise<PathKind> {
+  return invoke<PathKind>("guest_join", { invite, mode });
+}
+
+/** Mede a latência até o Host. */
+export function guestPing(): Promise<PingResult> {
+  return invoke<PingResult>("guest_ping");
+}
+
+/** Sai da sala. */
+export function guestLeave(): Promise<void> {
+  return invoke("guest_leave");
+}
+
+/** Escuta os eventos de rede. Devolve a função que para de escutar. */
+export function onNetEvent(handler: (event: NetEvent) => void): Promise<UnlistenFn> {
+  return listen<NetEvent>("net-event", (e) => handler(e.payload));
+}
+
+/** Converte o erro de um `invoke` em texto para mostrar ao usuário. */
+export function errorMessage(err: unknown): string {
+  if (typeof err === "string") return err;
+  if (err instanceof Error) return err.message;
+  return "Erro inesperado.";
 }

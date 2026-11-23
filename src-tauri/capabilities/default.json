@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Permissões mínimas da janela principal: só o básico do Tauri (eventos, janela). Sem acesso a arquivos, shell ou rede pela WebView.",
+  "windows": ["main"],
+  "permissions": ["core:default"]
+}

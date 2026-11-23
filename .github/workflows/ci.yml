@@ -1,0 +1,74 @@
+# CI rápida: roda a cada envio (push) e em pull requests.
+#
+# Faz no Linux, que é o runner mais rápido e barato:
+#   1. compila a interface (TypeScript + Vite);
+#   2. checa formatação, lints (clippy) e roda os testes do núcleo Rust.
+#
+# É aqui que vão acontecer a maioria dos ciclos "editar -> compilar -> ver erro".
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# Se chegar um envio novo enquanto o anterior ainda roda, cancela o antigo.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: Interface + núcleo Rust (Linux)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Dependências de sistema do Tauri (Linux)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential curl wget file \
+            libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: lts/*
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      # Guarda as dependências Rust já compiladas entre execuções.
+      # A primeira execução é lenta; as seguintes reaproveitam o cache.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Instalar dependências npm
+        run: npm ci
+
+      # O Rust precisa da pasta `dist` pronta (o Tauri embute a interface no binário).
+      - name: Compilar interface
+        run: npm run build
+
+      - name: Formatação (cargo fmt)
+        working-directory: src-tauri
+        run: cargo fmt --check
+
+      - name: Lints (cargo clippy)
+        working-directory: src-tauri
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Testes (cargo test)
+        working-directory: src-tauri
+        run: cargo test
+
+      # Enquanto não há compilador Rust na máquina de desenvolvimento, o
+      # Cargo.lock (versões exatas das dependências) é gerado aqui.
+      - name: Publicar Cargo.lock
+        uses: actions/upload-artifact@v7
+        with:
+          name: cargo-lock
+          path: src-tauri/Cargo.lock

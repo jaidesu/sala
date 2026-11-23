@@ -1,0 +1,55 @@
+# Gera o app para Windows, para testar no computador de desenvolvimento.
+#
+# Roda a cada envio para `main` (ou manualmente na aba Actions do GitHub).
+# O resultado fica em "Artifacts" na página da execução:
+#   - sala-windows-instalador: instalador .exe (NSIS)
+#   - sala-windows-portatil:   o executável direto, sem instalar
+name: Build Windows
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: build-windows-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build Windows (.exe)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: lts/*
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Instalar dependências npm
+        run: npm ci
+
+      # `tauri build` compila a interface, o Rust em modo release e gera o instalador.
+      - name: Compilar app
+        run: npm run tauri build -- --bundles nsis
+
+      - name: Publicar instalador
+        uses: actions/upload-artifact@v7
+        with:
+          name: sala-windows-instalador
+          path: src-tauri/target/release/bundle/nsis/*.exe
+          retention-days: 14
+
+      - name: Publicar executável portátil
+        uses: actions/upload-artifact@v7
+        with:
+          name: sala-windows-portatil
+          path: src-tauri/target/release/sala.exe
+          retention-days: 14

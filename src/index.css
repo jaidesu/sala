@@ -1,0 +1,17 @@
+/* Tailwind CSS v4: um único import traz tudo (não há mais tailwind.config.js). */
+@import "tailwindcss";
+
+/* Tema escuro por padrão, como pede o SPEC.md. */
+:root {
+  color-scheme: dark;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  @apply bg-zinc-950 text-zinc-100 antialiased;
+}

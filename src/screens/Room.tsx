@@ -10,10 +10,12 @@ interface RoomProps {
   onSend: (text: string) => Promise<boolean>;
   /** Host: encerrar a sala. Convidado: sair. Depois do fim: voltar ao início. */
   onExit: () => void;
+  /** Host: remover um participante. */
+  onKick?: (id: number) => void;
 }
 
 /** Tela da sala: mensagens, campo de envio e participantes. */
-export default function Room({ view, onSend, onExit }: RoomProps) {
+export default function Room({ view, onSend, onExit, onKick }: RoomProps) {
   const [copied, setCopied] = useState(false);
   // Sair/encerrar pede um segundo clique (confirmação dentro da própria tela;
   // `window.confirm` não funciona em todos os WebViews).
@@ -109,9 +111,23 @@ export default function Room({ view, onSend, onExit }: RoomProps) {
       <div className="flex min-h-0 flex-1">
         <section className="flex min-w-0 flex-1 flex-col">
           <MessageList items={view.timeline} myId={view.me.id} emptyHint={emptyHint} />
-          <MessageInput disabled={view.ended} onSend={onSend} />
+          <MessageInput
+            disabled={view.ended || view.connection === "reconnecting"}
+            placeholder={
+              view.ended
+                ? "Sala encerrada"
+                : view.connection === "reconnecting"
+                  ? "Reconectando… aguarde"
+                  : undefined
+            }
+            onSend={onSend}
+          />
         </section>
-        <ParticipantList participants={view.participants} myId={view.me.id} />
+        <ParticipantList
+          participants={view.participants}
+          myId={view.me.id}
+          onKick={isHost && !view.ended ? onKick : undefined}
+        />
       </div>
     </main>
   );

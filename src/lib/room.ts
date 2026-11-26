@@ -53,25 +53,82 @@ export function fromSnapshot(
   };
 }
 
+/** Substitui (pelo id) ou acrescenta um participante na lista. */
+function upsert(list: Participant[], p: Participant): Participant[] {
+  return list.some((x) => x.id === p.id)
+    ? list.map((x) => (x.id === p.id ? p : x))
+    : [...list, p];
+}
+
+/** Acrescenta à linha do tempo as mensagens que ainda não estão nela. */
+function mergeHistory(timeline: TimelineItem[], history: ChatMessage[]): TimelineItem[] {
+  const known = new Set(
+    timeline.flatMap((i) => (i.kind === "chat" ? [i.message.id] : [])),
+  );
+  return [...timeline, ...history.filter((m) => !known.has(m.id)).map(chatItem)];
+}
+
 export function applyEvent(view: RoomView, event: NetEvent): RoomView {
   switch (event.kind) {
     case "chat":
-      // Evita duplicar se a mesma mensagem chegar duas vezes.
-      if (view.timeline.some((i) => i.kind === "chat" && i.message.id === event.message.id)) {
-        return view;
-      }
-      return { ...view, timeline: [...view.timeline, chatItem(event.message)] };
+      return { ...view, timeline: mergeHistory(view.timeline, [event.message]) };
     case "participantJoined":
       return {
         ...view,
-        participants: [...view.participants, event.participant],
+        participants: upsert(view.participants, event.participant),
         timeline: [...view.timeline, system(`${event.participant.nickname} entrou.`)],
       };
+    case "participantUpdated": {
+      const p = event.participant;
+      return {
+        ...view,
+        participants: upsert(view.participants, p),
+        timeline: [
+          ...view.timeline,
+          system(p.online ? `${p.nickname} voltou.` : `${p.nickname} perdeu a conexão.`),
+        ],
+      };
+    }
     case "participantLeft":
       return {
         ...view,
         participants: view.participants.filter((p) => p.id !== event.participant.id),
-        timeline: [...view.timeline, system(`${event.participant.nickname} saiu.`)],
+        timeline: [
+          ...view.timeline,
+          system(
+            event.kicked
+              ? `${event.participant.nickname} foi removido(a) pelo Host.`
+              : `${event.participant.nickname} saiu.`,
+          ),
+        ],
+      };
+    case "reconnecting":
+      if (view.ended || view.connection === "reconnecting") return view;
+      return {
+        ...view,
+        connection: "reconnecting",
+        timeline: [
+          ...view.timeline,
+          system("Conexão perdida. Tentando reconectar…", "warn"),
+        ],
+      };
+    case "resynced":
+      return {
+        ...view,
+        me: event.room.me,
+        participants: event.room.participants,
+        connection: event.path,
+        timeline: [
+          ...mergeHistory(view.timeline, event.room.history),
+          system("Reconectado."),
+        ],
+      };
+    case "kicked":
+      return {
+        ...view,
+        ended: true,
+        connection: "disconnected",
+        timeline: [...view.timeline, system("Você foi removido(a) da sala pelo Host.", "warn")],
       };
     case "rejected":
       return { ...view, timeline: [...view.timeline, system(event.reason, "warn")] };
@@ -81,7 +138,10 @@ export function applyEvent(view: RoomView, event: NetEvent): RoomView {
         timeline: [...view.timeline, system("Tentativa de entrada recusada.", "warn")],
       };
     case "pathChanged":
-      return view.ended ? view : { ...view, connection: event.path };
+      // Durante a reconexão, avisos de caminho da conexão antiga não valem.
+      return view.ended || view.connection === "reconnecting"
+        ? view
+        : { ...view, connection: event.path };
     case "roomClosed":
       return {
         ...view,
@@ -95,7 +155,13 @@ export function applyEvent(view: RoomView, event: NetEvent): RoomView {
         ...view,
         ended: true,
         connection: "disconnected",
-        timeline: [...view.timeline, system("A conexão com o Host caiu.", "warn")],
+        timeline: [
+          ...view.timeline,
+          system(
+            "Não foi possível reconectar ao Host. A sala pode ter sido encerrada ou o computador dele desligou.",
+            "warn",
+          ),
+        ],
       };
   }
 }

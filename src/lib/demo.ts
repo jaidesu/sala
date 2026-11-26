@@ -16,11 +16,11 @@ const min = (n: number) => t0 + n * 60_000;
 export const demoRoom: RoomView = {
   role: "host",
   invite: "sala1:exemplo",
-  me: { id: 0, nickname: "Jair", isHost: true },
+  me: { id: 0, nickname: "Jair", isHost: true, online: true },
   participants: [
-    { id: 0, nickname: "Jair", isHost: true },
-    { id: 1, nickname: "Ana", isHost: false },
-    { id: 2, nickname: "Bia", isHost: false },
+    { id: 0, nickname: "Jair", isHost: true, online: true },
+    { id: 1, nickname: "Ana", isHost: false, online: true },
+    { id: 2, nickname: "Bia", isHost: false, online: false },
   ],
   timeline: [
     { kind: "system", key: "s1", text: "Sala aberta.", tone: "info" },
@@ -54,6 +54,7 @@ export const demoRoom: RoomView = {
       },
     },
     { kind: "system", key: "s4", text: "Tentativa de entrada recusada.", tone: "warn" },
+    { kind: "system", key: "s5", text: "Bia perdeu a conexão.", tone: "info" },
   ],
   ended: false,
 };

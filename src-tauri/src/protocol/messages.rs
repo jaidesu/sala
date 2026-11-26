@@ -4,14 +4,14 @@
 //!
 //! 1. `Hello` (os dois lados) — versão e sala;
 //! 2. `PakeMsg` e `PakeConfirm` — handshake de senha (ver `net::auth`);
-//! 3. `Join` (Convidado) → `Joined` + N × `Chat` com o histórico (Host);
-//! 4. dali em diante: `Send` (Convidado → Host) e `Chat`,
-//!    `ParticipantJoined`, `ParticipantLeft`, `Rejected`, `RoomClosed`
-//!    (Host → Convidados).
+//! 3. `Join` (Convidado, com token de retomada se estiver reconectando) →
+//!    `Joined` + N × `Chat` com o histórico (Host);
+//! 4. dali em diante: `Send` e `Leave` (Convidado → Host) e `Chat`,
+//!    `ParticipantJoined`, `ParticipantUpdated`, `ParticipantLeft`,
+//!    `Rejected`, `Kick`, `RoomClosed` (Host → Convidados).
 //!
 //! O SPEC.md lista também `Ping`/`Pong`. Não foram necessários: o QUIC do iroh
 //! já manda "batimentos" (keep-alive) sozinho e detecta conexões mortas.
-//! `Kick` chega na fase 6.
 //!
 //! O atributo `#[serde(tag = "type")]` faz cada mensagem virar um JSON com o
 //! campo `type` dizendo qual é, por exemplo: `{"type":"send_message","text":"oi"}`.
@@ -21,7 +21,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::room::{
     invite::RoomId,
-    state::{ChatMessage, Participant},
+    state::{ChatMessage, Participant, ParticipantId, ResumeToken},
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -39,7 +39,13 @@ pub enum Message {
     PakeConfirm { mac: Vec<u8> },
 
     /// Convidado → Host, logo após a senha: "quero entrar com este apelido".
-    Join { nickname: String },
+    /// Ao reconectar, `resume` traz o token recebido no `Joined` anterior,
+    /// para voltar como a mesma pessoa.
+    Join {
+        nickname: String,
+        #[serde(default)]
+        resume: Option<ResumeToken>,
+    },
     /// Host → Convidado: entrou. `you` traz o apelido final (pode ter ganhado
     /// um número). Em seguida vêm `history_count` mensagens `Chat` com o
     /// histórico (uma por vez, para nenhuma passar do limite de 64 KiB).
@@ -47,11 +53,19 @@ pub enum Message {
         you: Participant,
         participants: Vec<Participant>,
         history_count: u32,
+        /// Guarde para reconectar como a mesma pessoa se a conexão cair.
+        resume_token: ResumeToken,
     },
     /// Host → todos: alguém entrou.
     ParticipantJoined { participant: Participant },
-    /// Host → todos: alguém saiu.
-    ParticipantLeft { participant: Participant },
+    /// Host → todos: alguém ficou offline ou voltou (campo `online`).
+    ParticipantUpdated { participant: Participant },
+    /// Host → todos: alguém saiu. `kicked` = removido pelo Host.
+    ParticipantLeft { participant: Participant, kicked: bool },
+    /// Convidado → Host: "estou saindo de propósito" (não esperar reconexão).
+    Leave,
+    /// Host → alvo: você foi removido da sala.
+    Kick { participant_id: ParticipantId },
     /// Convidado → Host: "publique esta mensagem". (No fio continua se chamando
     /// `send_message`, como no SPEC.md; em Rust é `Send` para não repetir
     /// "Message" do nome do enum, o que o clippy desaconselha.)

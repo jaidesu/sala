@@ -17,9 +17,30 @@ mod net;
 mod protocol;
 mod room;
 
+use std::{
+    sync::atomic::{AtomicBool, Ordering},
+    time::Duration,
+};
+
+use tauri::{AppHandle, Manager, RunEvent, WindowEvent};
+
+/// Vira `true` quando o encerramento educado começa (evita fazer duas vezes).
+static SHUTTING_DOWN: AtomicBool = AtomicBool::new(false);
+
+/// Avisa os outros (sala encerrada / saí da sala) e só então fecha o app.
+/// Se a rede travar, desiste depois de 3 s e fecha mesmo assim.
+fn graceful_exit(app: &AppHandle) {
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let state = app.state::<commands::NetState>();
+        let _ = tokio::time::timeout(Duration::from_secs(3), state.shutdown()).await;
+        app.exit(0);
+    });
+}
+
 /// Ponto de entrada do aplicativo, chamado pelo `main.rs`.
 pub fn run() {
-    tauri::Builder::default()
+    let app = tauri::Builder::default()
         // Estado compartilhado entre os comandos (sala aberta, conexão ativa).
         .manage(commands::NetState::default())
         // Lista de comandos que a interface pode chamar com `invoke("nome")`.
@@ -32,7 +53,29 @@ pub fn run() {
             commands::guest_join,
             commands::guest_leave,
             commands::send_message,
+            commands::kick_participant,
         ])
-        .run(tauri::generate_context!())
+        // Fechar a janela (X): segura o fechamento até avisar os outros.
+        .on_window_event(|window, event| {
+            if let WindowEvent::CloseRequested { api, .. } = event
+                && !SHUTTING_DOWN.swap(true, Ordering::SeqCst)
+            {
+                api.prevent_close();
+                graceful_exit(window.app_handle());
+            }
+        })
+        .build(tauri::generate_context!())
         .expect("falha ao iniciar o aplicativo Tauri");
+
+    // Sair pelo sistema (ex.: Cmd+Q no macOS) também passa pelo encerramento
+    // educado. `code` vem preenchido quando somos nós que chamamos `exit`.
+    app.run(|app, event| {
+        if let RunEvent::ExitRequested { api, code, .. } = event
+            && code.is_none()
+            && !SHUTTING_DOWN.swap(true, Ordering::SeqCst)
+        {
+            api.prevent_exit();
+            graceful_exit(app);
+        }
+    });
 }

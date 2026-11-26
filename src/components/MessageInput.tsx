@@ -7,9 +7,12 @@ import { MAX_MESSAGE_CHARS } from "../lib/tauri";
  */
 export default function MessageInput({
   disabled,
+  placeholder,
   onSend,
 }: {
   disabled: boolean;
+  /** Texto do campo vazio (padrão: "Escreva uma mensagem…"). */
+  placeholder?: string;
   onSend: (text: string) => Promise<boolean>;
 }) {
   const [text, setText] = useState("");
@@ -45,7 +48,7 @@ export default function MessageInput({
         autoFocus
         maxLength={MAX_MESSAGE_CHARS}
         rows={1}
-        placeholder={disabled ? "Sala encerrada" : "Escreva uma mensagem…"}
+        placeholder={placeholder ?? "Escreva uma mensagem…"}
         className="max-h-40 min-h-10 flex-1 resize-none rounded-lg border border-zinc-800 bg-zinc-900 px-3 py-2 text-sm disabled:opacity-50"
       />
       <button

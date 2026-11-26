@@ -6,17 +6,24 @@
 //!    tentativas. Se algo estiver errado, fecha a conexão sem explicar o
 //!    motivo (não dar pistas a quem está tentando invadir);
 //! 3. o Host responde `Hello` e os dois rodam o handshake de senha (`auth`);
-//! 4. o Convidado manda `Join` com o apelido; o Host responde `Joined`, a lista
-//!    de participantes e o histórico, e avisa os outros;
+//! 4. o Convidado manda `Join` com o apelido (e o token de retomada, se estiver
+//!    reconectando); o Host responde `Joined`, a lista de participantes e o
+//!    histórico, e avisa os outros;
 //! 5. a partir daí, cada `Send` vira um `Chat` retransmitido a todos.
 //!
 //! # Como as mensagens chegam a todos
 //!
-//! Cada Convidado tem uma **caixa de saída** (`outbox`): um canal com espaço
-//! para `OUTBOX_CAPACITY` mensagens, esvaziado por uma tarefa que escreve no
-//! stream dele. Retransmitir é só colocar a mensagem em todas as caixas, sem
-//! esperar a rede. Se a caixa de alguém enche (conexão lenta ou travada),
-//! essa pessoa é desconectada, para não atrasar nem pesar para os outros.
+//! Cada Convidado conectado tem uma **caixa de saída** (`outbox`): um canal com
+//! espaço para `OUTBOX_CAPACITY` mensagens, esvaziado por uma tarefa que
+//! escreve no stream dele. Retransmitir é só colocar a mensagem em todas as
+//! caixas, sem esperar a rede. Se a caixa de alguém enche (conexão lenta ou
+//! travada), essa conexão é encerrada, para não atrasar os outros.
+//!
+//! # Quedas
+//!
+//! Se a conexão de um Convidado cai sem `Leave`, ele fica **offline** (não sai
+//! da sala) e pode voltar com o token de retomada. Uma tarefa de limpeza
+//! remove quem fica offline por mais de `OFFLINE_GRACE`.
 
 use std::{
     collections::HashMap,
@@ -49,17 +56,23 @@ use crate::{
     protocol::{PROTOCOL_VERSION, messages::Message, recv_msg, send_msg},
     room::{
         invite::{Invite, RoomId},
-        state::{HOST_ID, ParticipantId, RoomError, RoomState, now_millis},
+        state::{
+            Admission, HOST_ID, ParticipantId, RoomError, RoomState, SessionId, now_millis,
+        },
     },
 };
 
 /// Código de fechamento usado quando o Host recusa uma conexão.
 const CLOSE_REFUSED: u32 = 1;
+/// Código de fechamento quando uma conexão é substituída ou encerrada pelo Host.
+const CLOSE_REPLACED: u32 = 3;
 /// Mensagens que podem ficar na fila de um Convidado antes de ele ser
 /// considerado lento demais.
 const OUTBOX_CAPACITY: usize = 256;
 /// Tempo para as últimas mensagens (ex.: `RoomClosed`) saírem antes de fechar.
 const CLOSE_GRACE: Duration = Duration::from_millis(300);
+/// De quanto em quanto tempo procurar quem ficou offline demais.
+const EXPIRY_INTERVAL: Duration = Duration::from_secs(5);
 
 /// Dados fixos para autenticar Convidados.
 struct RoomAuth {
@@ -70,10 +83,17 @@ struct RoomAuth {
     limiter: Mutex<AttemptLimiter>,
 }
 
+/// A conexão atual de um Convidado.
+struct Outbox {
+    session: SessionId,
+    tx: mpsc::Sender<Message>,
+    conn: Connection,
+}
+
 /// Estado vivo da sala + caixas de saída de quem está conectado.
 struct Hub {
     state: RoomState,
-    outboxes: HashMap<ParticipantId, mpsc::Sender<Message>>,
+    outboxes: HashMap<ParticipantId, Outbox>,
     /// `true` depois de `stop()`: ninguém mais entra e não geramos eventos.
     closed: bool,
 }
@@ -83,13 +103,22 @@ impl Hub {
     fn broadcast(&mut self, msg: &Message) {
         let mut too_slow = Vec::new();
         for (id, outbox) in &self.outboxes {
-            if outbox.try_send(msg.clone()).is_err() {
+            if outbox.tx.try_send(msg.clone()).is_err() {
                 too_slow.push(*id);
             }
         }
-        // Tirar a caixa de saída encerra a tarefa que escreve para essa
-        // pessoa, o que fecha a conexão dela. A saída é tratada em `serve_guest`.
+        // Fechar a conexão faz a pessoa ficar offline; o app dela reconecta
+        // sozinho e recebe a foto atualizada da sala.
         for id in too_slow {
+            if let Some(outbox) = self.outboxes.remove(&id) {
+                outbox.conn.close(CLOSE_REPLACED.into(), b"");
+            }
+        }
+    }
+
+    /// Tira a caixa de saída de `id` se ela ainda for da sessão `session`.
+    fn remove_outbox(&mut self, id: ParticipantId, session: SessionId) {
+        if self.outboxes.get(&id).is_some_and(|o| o.session == session) {
             self.outboxes.remove(&id);
         }
     }
@@ -119,7 +148,7 @@ pub struct Host {
     endpoint: Endpoint,
     invite: Invite,
     shared: Arc<Shared>,
-    accept_task: JoinHandle<()>,
+    tasks: Vec<JoinHandle<()>>,
 }
 
 impl Host {
@@ -170,13 +199,16 @@ impl Host {
             events,
         });
 
-        let accept_task = tokio::spawn(accept_loop(endpoint.clone(), shared.clone()));
+        let tasks = vec![
+            tokio::spawn(accept_loop(endpoint.clone(), shared.clone())),
+            tokio::spawn(expiry_loop(shared.clone())),
+        ];
 
         Ok(Self {
             endpoint,
             invite,
             shared,
-            accept_task,
+            tasks,
         })
     }
 
@@ -216,6 +248,41 @@ impl Host {
         Ok(())
     }
 
+    /// Remove alguém da sala. A pessoa recebe `Kick` e a conexão dela é
+    /// encerrada; o token de retomada dela deixa de valer.
+    ///
+    /// Limitação: quem sabe a senha pode entrar de novo como alguém novo.
+    /// Para afastar alguém de vez, encerre a sala e abra outra com outra senha.
+    pub fn kick(&self, id: ParticipantId) -> Result<(), RoomError> {
+        let participant = {
+            let mut hub = self.shared.hub();
+            let participant = hub.state.kick(id)?;
+            if let Some(outbox) = hub.outboxes.remove(&id) {
+                // Soltar `tx` faz a tarefa de escrita mandar o `Kick` e encerrar
+                // o stream; o app do Convidado fecha a conexão ao ler.
+                let _ = outbox.tx.try_send(Message::Kick { participant_id: id });
+            }
+            hub.broadcast(&Message::ParticipantLeft {
+                participant: participant.clone(),
+                kicked: true,
+            });
+            participant
+        };
+        self.shared.emit(NetEvent::ParticipantLeft {
+            participant,
+            kicked: true,
+        });
+        Ok(())
+    }
+
+    /// Só para testes: derruba a conexão de `id` como se a rede tivesse caído.
+    #[cfg(test)]
+    pub fn drop_connection(&self, id: ParticipantId) {
+        if let Some(outbox) = self.shared.hub().outboxes.get(&id) {
+            outbox.conn.close(CLOSE_REPLACED.into(), b"teste");
+        }
+    }
+
     /// Encerra a sala: avisa todos, espera um pouco e fecha as conexões.
     pub async fn stop(self) {
         {
@@ -230,7 +297,9 @@ impl Host {
         // `close` avisa os Convidados e faz o `accept()` devolver `None`,
         // o que encerra o `accept_loop`.
         self.endpoint.close().await;
-        self.accept_task.abort();
+        for task in &self.tasks {
+            task.abort();
+        }
     }
 }
 
@@ -245,6 +314,34 @@ async fn accept_loop(endpoint: Endpoint, shared: Arc<Shared>) {
             };
             serve_guest(conn, shared).await;
         });
+    }
+}
+
+/// Tira da sala quem ficou offline por tempo demais.
+async fn expiry_loop(shared: Arc<Shared>) {
+    let mut tick = tokio::time::interval(EXPIRY_INTERVAL);
+    loop {
+        tick.tick().await;
+        let gone = {
+            let mut hub = shared.hub();
+            if hub.closed {
+                return;
+            }
+            let gone = hub.state.expire(Instant::now());
+            for participant in &gone {
+                hub.broadcast(&Message::ParticipantLeft {
+                    participant: participant.clone(),
+                    kicked: false,
+                });
+            }
+            gone
+        };
+        for participant in gone {
+            shared.emit(NetEvent::ParticipantLeft {
+                participant,
+                kicked: false,
+            });
+        }
     }
 }
 
@@ -273,46 +370,82 @@ async fn serve_guest(conn: Connection, shared: Arc<Shared>) {
         }
     };
 
-    // 4. Join: o Convidado diz o apelido.
-    let nickname = match timeout(HANDSHAKE_TIMEOUT, recv_msg::<_, Message>(&mut recv)).await {
-        Ok(Ok(Message::Join { nickname })) => nickname,
-        _ => {
-            conn.close(CLOSE_REFUSED.into(), b"");
-            return;
-        }
-    };
+    // 4. Join: o Convidado diz o apelido (e talvez o token de retomada).
+    let (nickname, resume) =
+        match timeout(HANDSHAKE_TIMEOUT, recv_msg::<_, Message>(&mut recv)).await {
+            Ok(Ok(Message::Join { nickname, resume })) => (nickname, resume),
+            _ => {
+                conn.close(CLOSE_REFUSED.into(), b"");
+                return;
+            }
+        };
 
-    let (outbox, mut outbox_rx) = mpsc::channel(OUTBOX_CAPACITY);
+    let (outbox_tx, mut outbox_rx) = mpsc::channel(OUTBOX_CAPACITY);
     let joined = {
         let mut hub = shared.hub();
         if hub.closed {
-            Err(anyhow!("sala encerrada"))
+            Err(anyhow!("A sala foi encerrada."))
         } else {
-            match hub.state.join(&nickname, Instant::now()) {
-                Ok(me) => {
+            // Retomada com token válido; senão, entrada nova.
+            let admission = match resume.and_then(|t| hub.state.resume(&t)) {
+                Some(a) => Ok(a),
+                None => hub.state.join(&nickname, Instant::now()),
+            };
+            match admission {
+                Ok(admission) => {
+                    let me = admission.participant.clone();
+                    if admission.resumed {
+                        // Se a conexão antiga ainda estava pendurada, fecha.
+                        if let Some(old) = hub.outboxes.remove(&me.id) {
+                            old.conn.close(CLOSE_REPLACED.into(), b"");
+                        }
+                        hub.broadcast(&Message::ParticipantUpdated {
+                            participant: me.clone(),
+                        });
+                    } else {
+                        hub.broadcast(&Message::ParticipantJoined {
+                            participant: me.clone(),
+                        });
+                    }
                     let participants = hub.state.participants();
                     let history = hub.state.history();
-                    hub.broadcast(&Message::ParticipantJoined {
-                        participant: me.clone(),
-                    });
                     // A caixa entra na mesma "trava" em que tiramos a foto
                     // da sala: nada que aconteça depois se perde.
-                    hub.outboxes.insert(me.id, outbox);
-                    Ok((me, participants, history))
+                    hub.outboxes.insert(
+                        me.id,
+                        Outbox {
+                            session: admission.session,
+                            tx: outbox_tx,
+                            conn: conn.clone(),
+                        },
+                    );
+                    Ok((admission, participants, history))
                 }
                 Err(e) => Err(anyhow!(e)),
             }
         }
     };
-    let (me, participants, history) = match joined {
+    let (admission, participants, history) = match joined {
         Ok(j) => j,
         Err(e) => {
             refuse_politely(&conn, &mut send, e.to_string()).await;
             return;
         }
     };
-    shared.emit(NetEvent::ParticipantJoined {
-        participant: me.clone(),
+    let Admission {
+        participant: me,
+        token,
+        session,
+        resumed,
+    } = admission;
+    shared.emit(if resumed {
+        NetEvent::ParticipantUpdated {
+            participant: me.clone(),
+        }
+    } else {
+        NetEvent::ParticipantJoined {
+            participant: me.clone(),
+        }
     });
 
     // Foto inicial direto no stream; o que acontecer enquanto isso espera na caixa.
@@ -323,6 +456,7 @@ async fn serve_guest(conn: Connection, shared: Arc<Shared>) {
                 you: me.clone(),
                 participants,
                 history_count: history.len() as u32,
+                resume_token: token,
             },
         )
         .await?;
@@ -332,6 +466,7 @@ async fn serve_guest(conn: Connection, shared: Arc<Shared>) {
         anyhow::Ok(())
     };
 
+    let mut left_on_purpose = false;
     if initial.await.is_ok() {
         // Tarefa de escrita: esvazia a caixa de saída no stream.
         let writer = tokio::spawn(async move {
@@ -340,33 +475,56 @@ async fn serve_guest(conn: Connection, shared: Arc<Shared>) {
                     break;
                 }
             }
-            // Caixa fechada (sala encerrada ou Convidado lento): encerra o stream.
+            // Caixa fechada (sala encerrada, expulsão ou lentidão): encerra o stream.
             let _ = send.finish();
         });
 
-        // 5. Leitura: cada `Send` vira um `Chat` para todos.
-        while let Ok(Message::Send { text }) = recv_msg::<_, Message>(&mut recv).await {
-            handle_send(&shared, me.id, &text);
+        // 5. Leitura: cada `Send` vira um `Chat` para todos; `Leave` é saída.
+        loop {
+            match recv_msg::<_, Message>(&mut recv).await {
+                Ok(Message::Send { text }) => handle_send(&shared, me.id, &text),
+                Ok(Message::Leave) => {
+                    left_on_purpose = true;
+                    break;
+                }
+                _ => break,
+            }
         }
-        writer.abort();
+        // Deixa a tarefa de escrita terminar de enviar (ex.: `Kick`).
+        let _ = timeout(CLOSE_GRACE, writer).await;
     }
 
-    // Saída (normal, queda ou erro): tira da sala e avisa os outros.
-    let left = {
+    // Saída: de propósito → sai da sala; queda → fica offline esperando voltar.
+    // Nada disso vale se esta conexão já foi substituída por outra (sessão nova).
+    let event = {
         let mut hub = shared.hub();
-        hub.outboxes.remove(&me.id);
-        let left = hub.state.leave(me.id);
-        if let Some(p) = &left
-            && !hub.closed
-        {
-            hub.broadcast(&Message::ParticipantLeft {
-                participant: p.clone(),
-            });
+        hub.remove_outbox(me.id, session);
+        if hub.closed {
+            None
+        } else if left_on_purpose {
+            let left = hub.state.leave(me.id, session);
+            left.map(|participant| {
+                hub.broadcast(&Message::ParticipantLeft {
+                    participant: participant.clone(),
+                    kicked: false,
+                });
+                NetEvent::ParticipantLeft {
+                    participant,
+                    kicked: false,
+                }
+            })
+        } else {
+            let offline = hub.state.disconnect(me.id, session, Instant::now());
+            offline.map(|participant| {
+                hub.broadcast(&Message::ParticipantUpdated {
+                    participant: participant.clone(),
+                });
+                NetEvent::ParticipantUpdated { participant }
+            })
         }
-        left.filter(|_| !hub.closed)
     };
-    if let Some(participant) = left {
-        shared.emit(NetEvent::ParticipantLeft { participant });
+    if let Some(event) = event {
+        shared.emit(event);
     }
     conn.close(0u32.into(), b"");
 }
@@ -385,7 +543,7 @@ fn handle_send(shared: &Shared, from: ParticipantId, text: &str) {
         }
         Err(e) => {
             if let Some(outbox) = hub.outboxes.get(&from) {
-                let _ = outbox.try_send(Message::Rejected {
+                let _ = outbox.tx.try_send(Message::Rejected {
                     reason: e.to_string(),
                 });
             }

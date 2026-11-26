@@ -17,7 +17,7 @@ use crate::{
     crypto::password,
     net::{NetEvent, PathKind, RoomSnapshot, endpoint::NetMode, guest::Guest, host::Host},
     protocol::PROTOCOL_VERSION,
-    room::invite::Invite,
+    room::{invite::Invite, state::ParticipantId},
 };
 
 /// Nome do evento Tauri que leva os `NetEvent` para a interface.
@@ -31,6 +31,19 @@ pub const NET_EVENT: &str = "net-event";
 pub struct NetState {
     host: Mutex<Option<Host>>,
     guest: Mutex<Option<Guest>>,
+}
+
+impl NetState {
+    /// Encerra tudo de forma educada (usado ao fechar a janela): o Host avisa
+    /// os Convidados que a sala acabou; o Convidado avisa que saiu.
+    pub async fn shutdown(&self) {
+        if let Some(host) = self.host.lock().await.take() {
+            host.stop().await;
+        }
+        if let Some(guest) = self.guest.lock().await.take() {
+            guest.leave().await;
+        }
+    }
 }
 
 /// Informações básicas do app, mostradas no rodapé da tela inicial.
@@ -143,15 +156,21 @@ pub async fn guest_join(
     if let Some(old) = slot.take() {
         old.leave().await;
     }
-    let (guest, room) = Guest::connect(mode, &invite, password, &nickname, event_channel(app))
-        .await
-        .map_err(|e| e.to_string())?;
-    let joined = GuestJoined {
-        path: guest.path(),
-        room,
-    };
+    let (guest, room, path) =
+        Guest::connect(mode, &invite, password, &nickname, event_channel(app))
+            .await
+            .map_err(|e| e.to_string())?;
     *slot = Some(guest);
-    Ok(joined)
+    Ok(GuestJoined { path, room })
+}
+
+/// (Host) Remove um participante da sala.
+#[tauri::command]
+pub async fn kick_participant(id: ParticipantId, state: State<'_, NetState>) -> Result<(), String> {
+    match state.host.lock().await.as_ref() {
+        Some(host) => host.kick(id).map_err(|e| e.to_string()),
+        None => Err("Só quem criou a sala pode remover participantes.".into()),
+    }
 }
 
 /// Sai da sala.
@@ -172,7 +191,7 @@ pub async fn send_message(text: String, state: State<'_, NetState>) -> Result<()
     if let Some(host) = state.host.lock().await.as_ref() {
         return host.send(&text).map_err(|e| e.to_string());
     }
-    if let Some(guest) = state.guest.lock().await.as_mut() {
+    if let Some(guest) = state.guest.lock().await.as_ref() {
         return guest.send(&text).await.map_err(|e| e.to_string());
     }
     Err("Você não está em nenhuma sala.".into())

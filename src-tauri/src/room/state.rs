@@ -10,6 +10,17 @@
 //! - mensagem de 1 a `MAX_MESSAGE_CHARS` caracteres;
 //! - cada participante tem um limite de ritmo (balde de fichas);
 //! - o Host carimba `id` e `timestamp`, e guarda as últimas `HISTORY_LIMIT`.
+//!
+//! # Quedas e retomada (fase 6)
+//!
+//! Quando a conexão de um Convidado cai, ele **não** sai da sala na hora: fica
+//! "offline" por até `OFFLINE_GRACE`. Se reconectar nesse tempo, apresenta o
+//! **token de retomada** que recebeu ao entrar e volta como a mesma pessoa
+//! (mesmo id e apelido). Depois do prazo, sai de vez.
+//!
+//! Cada conexão recebe um número de **sessão**. Assim, quando a conexão antiga
+//! finalmente percebe que caiu (às vezes depois que a nova já entrou), ela
+//! não bagunça o estado da conexão nova.
 
 use std::{
     collections::{BTreeMap, VecDeque},
@@ -22,14 +33,23 @@ use serde::{Deserialize, Serialize};
 /// Identificador de participante, atribuído pelo Host (sequencial).
 pub type ParticipantId = u32;
 
+/// Segredo que permite a um Convidado retomar seu lugar após uma queda.
+/// Só o próprio Convidado e o Host o conhecem.
+pub type ResumeToken = [u8; 16];
+
+/// Número da conexão atual de um participante (muda a cada reconexão).
+pub type SessionId = u64;
+
 /// O Host é sempre o participante 0.
 pub const HOST_ID: ParticipantId = 0;
 pub const MAX_NICKNAME_CHARS: usize = 32;
 pub const MAX_MESSAGE_CHARS: usize = 4000;
 pub const HISTORY_LIMIT: usize = 1000;
-/// Limite de pessoas na sala (inclui o Host). Mantém pequenas as mensagens
-/// com a lista de participantes e a carga no computador do Host.
+/// Limite de pessoas na sala (inclui o Host e quem está offline). Mantém
+/// pequenas as mensagens com a lista de participantes e a carga no Host.
 pub const MAX_PARTICIPANTS: usize = 50;
+/// Quanto tempo alguém pode ficar offline antes de sair da sala.
+pub const OFFLINE_GRACE: Duration = Duration::from_secs(60);
 
 /// Balde de fichas: cada mensagem gasta 1 ficha; o balde enche com o tempo.
 /// Permite rajadas curtas (até `BURST`) mas limita o ritmo médio.
@@ -43,6 +63,8 @@ pub struct Participant {
     pub id: ParticipantId,
     pub nickname: String,
     pub is_host: bool,
+    /// `false` enquanto a conexão está caída (esperando reconectar).
+    pub online: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -67,6 +89,7 @@ pub enum RoomError {
     MessageTooLong,
     RateLimited,
     UnknownParticipant,
+    CannotKickHost,
 }
 
 impl fmt::Display for RoomError {
@@ -83,7 +106,8 @@ impl fmt::Display for RoomError {
                 "Mensagem longa demais (máximo {MAX_MESSAGE_CHARS} caracteres)."
             ),
             Self::RateLimited => write!(f, "Muitas mensagens seguidas. Espere um pouco."),
-            Self::UnknownParticipant => write!(f, "Participante desconhecido."),
+            Self::UnknownParticipant => write!(f, "Essa pessoa não está mais na sala."),
+            Self::CannotKickHost => write!(f, "O Host não pode ser removido."),
         }
     }
 }
@@ -121,6 +145,19 @@ impl Bucket {
 struct Entry {
     info: Participant,
     bucket: Bucket,
+    token: ResumeToken,
+    session: SessionId,
+    offline_since: Option<Instant>,
+}
+
+/// Resultado de uma entrada na sala (nova ou retomada).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Admission {
+    pub participant: Participant,
+    pub token: ResumeToken,
+    pub session: SessionId,
+    /// `true` se foi uma retomada (a pessoa já estava na sala).
+    pub resumed: bool,
 }
 
 #[derive(Debug)]
@@ -129,6 +166,7 @@ pub struct RoomState {
     history: VecDeque<ChatMessage>,
     next_participant: ParticipantId,
     next_message: u64,
+    next_session: SessionId,
 }
 
 /// Limpa e confere um apelido.
@@ -152,6 +190,18 @@ pub fn check_text(text: &str) -> Result<(), RoomError> {
     Ok(())
 }
 
+fn random_token() -> ResumeToken {
+    let mut token = [0u8; 16];
+    getrandom::fill(&mut token).expect("gerador aleatório do sistema indisponível");
+    token
+}
+
+/// Comparação que leva sempre o mesmo tempo, para não vazar o token pela
+/// demora da resposta.
+fn same_token(a: &ResumeToken, b: &ResumeToken) -> bool {
+    a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
+}
+
 impl RoomState {
     /// Cria a sala com o Host como primeiro participante.
     pub fn new(host_nickname: &str, now: Instant) -> Result<Self, RoomError> {
@@ -164,8 +214,12 @@ impl RoomState {
                     id: HOST_ID,
                     nickname,
                     is_host: true,
+                    online: true,
                 },
                 bucket: Bucket::new(now),
+                token: random_token(),
+                session: 0,
+                offline_since: None,
             },
         );
         Ok(Self {
@@ -173,11 +227,18 @@ impl RoomState {
             history: VecDeque::new(),
             next_participant: HOST_ID + 1,
             next_message: 1,
+            next_session: 1,
         })
     }
 
-    /// Adiciona um Convidado. Devolve o participante com o apelido final.
-    pub fn join(&mut self, nickname: &str, now: Instant) -> Result<Participant, RoomError> {
+    fn new_session(&mut self) -> SessionId {
+        let s = self.next_session;
+        self.next_session += 1;
+        s
+    }
+
+    /// Adiciona um Convidado novo.
+    pub fn join(&mut self, nickname: &str, now: Instant) -> Result<Admission, RoomError> {
         let nickname = clean_nickname(nickname)?;
         if self.participants.len() >= MAX_PARTICIPANTS {
             return Err(RoomError::RoomFull);
@@ -185,27 +246,105 @@ impl RoomState {
         let nickname = self.unique_nickname(nickname);
         let id = self.next_participant;
         self.next_participant += 1;
+        let session = self.new_session();
+        let token = random_token();
         let info = Participant {
             id,
             nickname,
             is_host: false,
+            online: true,
         };
         self.participants.insert(
             id,
             Entry {
                 info: info.clone(),
                 bucket: Bucket::new(now),
+                token,
+                session,
+                offline_since: None,
             },
         );
-        Ok(info)
+        Ok(Admission {
+            participant: info,
+            token,
+            session,
+            resumed: false,
+        })
     }
 
-    /// Remove um participante. Devolve quem saiu (ou `None` se já não estava).
-    pub fn leave(&mut self, id: ParticipantId) -> Option<Participant> {
-        if id == HOST_ID {
-            return None; // o Host não "sai": ele encerra a sala
+    /// Tenta retomar o lugar de quem apresentou `token`. Funciona com a
+    /// pessoa offline ou (se a conexão antiga ainda não percebeu a queda)
+    /// online: a sessão nova substitui a antiga.
+    pub fn resume(&mut self, token: &ResumeToken) -> Option<Admission> {
+        let session = self.new_session();
+        let entry = self
+            .participants
+            .values_mut()
+            .find(|e| !e.info.is_host && same_token(&e.token, token))?;
+        entry.session = session;
+        entry.offline_since = None;
+        entry.info.online = true;
+        Some(Admission {
+            participant: entry.info.clone(),
+            token: entry.token,
+            session,
+            resumed: true,
+        })
+    }
+
+    /// A conexão `session` de `id` caiu: marca offline (se ainda for a sessão
+    /// atual). Devolve o participante atualizado.
+    pub fn disconnect(
+        &mut self,
+        id: ParticipantId,
+        session: SessionId,
+        now: Instant,
+    ) -> Option<Participant> {
+        let entry = self.participants.get_mut(&id)?;
+        if entry.info.is_host || entry.session != session || !entry.info.online {
+            return None;
         }
-        self.participants.remove(&id).map(|e| e.info)
+        entry.info.online = false;
+        entry.offline_since = Some(now);
+        Some(entry.info.clone())
+    }
+
+    /// Saída voluntária pela conexão `session`.
+    pub fn leave(&mut self, id: ParticipantId, session: SessionId) -> Option<Participant> {
+        match self.participants.get(&id) {
+            Some(e) if !e.info.is_host && e.session == session => {
+                self.participants.remove(&id).map(|e| e.info)
+            }
+            _ => None,
+        }
+    }
+
+    /// O Host remove alguém da sala.
+    pub fn kick(&mut self, id: ParticipantId) -> Result<Participant, RoomError> {
+        if id == HOST_ID {
+            return Err(RoomError::CannotKickHost);
+        }
+        self.participants
+            .remove(&id)
+            .map(|e| e.info)
+            .ok_or(RoomError::UnknownParticipant)
+    }
+
+    /// Remove quem está offline há mais de `OFFLINE_GRACE`.
+    pub fn expire(&mut self, now: Instant) -> Vec<Participant> {
+        let expired: Vec<ParticipantId> = self
+            .participants
+            .iter()
+            .filter(|(_, e)| {
+                e.offline_since
+                    .is_some_and(|t| now.saturating_duration_since(t) >= OFFLINE_GRACE)
+            })
+            .map(|(id, _)| *id)
+            .collect();
+        expired
+            .into_iter()
+            .filter_map(|id| self.participants.remove(&id).map(|e| e.info))
+            .collect()
     }
 
     /// Registra uma mensagem. O Host não tem limite de ritmo.
@@ -294,6 +433,7 @@ mod tests {
         assert_eq!(p.len(), 1);
         assert_eq!(p[0].id, HOST_ID);
         assert!(p[0].is_host);
+        assert!(p[0].online);
     }
 
     #[test]
@@ -309,10 +449,10 @@ mod tests {
     #[test]
     fn apelido_repetido_ganha_numero() {
         let (mut s, t) = sala();
-        assert_eq!(s.join("Ana", t).unwrap().nickname, "Ana");
-        assert_eq!(s.join("ana", t).unwrap().nickname, "ana (2)");
-        assert_eq!(s.join("Ana", t).unwrap().nickname, "Ana (3)");
-        assert_eq!(s.join("host", t).unwrap().nickname, "host (2)");
+        assert_eq!(s.join("Ana", t).unwrap().participant.nickname, "Ana");
+        assert_eq!(s.join("ana", t).unwrap().participant.nickname, "ana (2)");
+        assert_eq!(s.join("Ana", t).unwrap().participant.nickname, "Ana (3)");
+        assert_eq!(s.join("host", t).unwrap().participant.nickname, "host (2)");
     }
 
     #[test]
@@ -320,7 +460,7 @@ mod tests {
         let (mut s, t) = sala();
         let longo = "x".repeat(MAX_NICKNAME_CHARS);
         s.join(&longo, t).unwrap();
-        let segundo = s.join(&longo, t).unwrap().nickname;
+        let segundo = s.join(&longo, t).unwrap().participant.nickname;
         assert_eq!(segundo.chars().count(), MAX_NICKNAME_CHARS);
         assert!(segundo.ends_with(" (2)"));
     }
@@ -330,10 +470,10 @@ mod tests {
         let (mut s, t) = sala();
         let a = s.join("A", t).unwrap();
         let b = s.join("B", t).unwrap();
-        assert_eq!((a.id, b.id), (1, 2));
-        assert_eq!(s.leave(a.id).unwrap().nickname, "A");
-        assert!(s.leave(a.id).is_none());
-        assert!(s.leave(HOST_ID).is_none());
+        assert_eq!((a.participant.id, b.participant.id), (1, 2));
+        assert_eq!(s.leave(1, a.session).unwrap().nickname, "A");
+        assert!(s.leave(1, a.session).is_none());
+        assert!(s.leave(HOST_ID, 0).is_none());
         assert_eq!(s.participants().len(), 2);
     }
 
@@ -347,9 +487,71 @@ mod tests {
     }
 
     #[test]
-    fn mensagens_recebem_id_e_vao_para_o_historico() {
+    fn queda_e_retomada_mantem_id_e_apelido() {
         let (mut s, t) = sala();
         let a = s.join("Ana", t).unwrap();
+        let off = s.disconnect(1, a.session, t).unwrap();
+        assert!(!off.online);
+        // Ainda está na lista (offline), ocupando o apelido.
+        assert_eq!(s.join("Ana", t).unwrap().participant.nickname, "Ana (2)");
+
+        let volta = s.resume(&a.token).unwrap();
+        assert!(volta.resumed);
+        assert_eq!(volta.participant.id, 1);
+        assert_eq!(volta.participant.nickname, "Ana");
+        assert!(volta.participant.online);
+        assert_ne!(volta.session, a.session);
+    }
+
+    #[test]
+    fn conexao_antiga_nao_estraga_a_nova() {
+        let (mut s, t) = sala();
+        let a = s.join("Ana", t).unwrap();
+        // A reconexão chega antes de a conexão antiga perceber que caiu.
+        let nova = s.resume(&a.token).unwrap();
+        // Agora a antiga percebe: não deve marcar offline nem tirar da sala.
+        assert!(s.disconnect(1, a.session, t).is_none());
+        assert!(s.leave(1, a.session).is_none());
+        assert!(s.participants().iter().any(|p| p.id == 1 && p.online));
+        assert!(s.disconnect(1, nova.session, t).is_some());
+    }
+
+    #[test]
+    fn token_errado_nao_retoma() {
+        let (mut s, t) = sala();
+        s.join("Ana", t).unwrap();
+        assert!(s.resume(&[0u8; 16]).is_none());
+    }
+
+    #[test]
+    fn offline_por_muito_tempo_sai_da_sala() {
+        let (mut s, t) = sala();
+        let a = s.join("Ana", t).unwrap();
+        s.join("Bia", t).unwrap();
+        s.disconnect(1, a.session, t).unwrap();
+        assert!(s.expire(t + OFFLINE_GRACE / 2).is_empty());
+        let saiu = s.expire(t + OFFLINE_GRACE);
+        assert_eq!(saiu.len(), 1);
+        assert_eq!(saiu[0].nickname, "Ana");
+        // O token de quem saiu não serve mais.
+        assert!(s.resume(&a.token).is_none());
+    }
+
+    #[test]
+    fn expulsar() {
+        let (mut s, t) = sala();
+        let a = s.join("Ana", t).unwrap();
+        assert_eq!(s.kick(1).unwrap().nickname, "Ana");
+        assert_eq!(s.kick(1), Err(RoomError::UnknownParticipant));
+        assert_eq!(s.kick(HOST_ID), Err(RoomError::CannotKickHost));
+        // Expulso não consegue retomar com o token antigo.
+        assert!(s.resume(&a.token).is_none());
+    }
+
+    #[test]
+    fn mensagens_recebem_id_e_vao_para_o_historico() {
+        let (mut s, t) = sala();
+        let a = s.join("Ana", t).unwrap().participant;
         let m1 = s.post(a.id, "oi", t, 1000).unwrap();
         let m2 = s.post(HOST_ID, "olá", t, 2000).unwrap();
         assert_eq!((m1.id, m2.id), (1, 2));
@@ -384,7 +586,7 @@ mod tests {
     #[test]
     fn limite_de_ritmo_por_participante() {
         let (mut s, t) = sala();
-        let a = s.join("Ana", t).unwrap();
+        let a = s.join("Ana", t).unwrap().participant;
         for _ in 0..BURST as usize {
             s.post(a.id, "spam", t, 0).unwrap();
         }

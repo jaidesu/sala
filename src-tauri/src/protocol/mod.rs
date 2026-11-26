@@ -19,8 +19,9 @@ use tokio::io::{AsyncRead, AsyncWrite};
 /// incompatíveis, a conexão é recusada com uma mensagem clara, em vez de
 /// falhar de forma estranha no meio da conversa.
 ///
-/// Histórico: 1 = fase 2 (ping); 2 = fases 3 e 4 (senha e chat).
-pub const PROTOCOL_VERSION: u16 = 2;
+/// Histórico: 1 = fase 2 (ping); 2 = fases 3 e 4 (senha e chat);
+/// 3 = fase 6 (retomada após queda, expulsar, status online).
+pub const PROTOCOL_VERSION: u16 = 3;
 
 /// Serializa `msg` em JSON e envia como um quadro.
 pub async fn send_msg<W, T>(writer: &mut W, msg: &T) -> Result<()>

@@ -7,6 +7,7 @@ export type ConnectionState =
   | "direct"
   | "relay"
   | "unknown"
+  | "reconnecting"
   | "disconnected";
 
 const STYLES: Record<ConnectionState, { label: string; dot: string; hint: string }> = {
@@ -29,6 +30,11 @@ const STYLES: Record<ConnectionState, { label: string; dot: string; hint: string
     label: "Conectado",
     dot: "bg-zinc-400",
     hint: "Conectado; o caminho ainda está sendo escolhido.",
+  },
+  reconnecting: {
+    label: "Reconectando…",
+    dot: "bg-amber-400 animate-pulse",
+    hint: "A conexão caiu. Tentando voltar sozinho; suas mensagens anteriores continuam aqui.",
   },
   disconnected: {
     label: "Desconectado",

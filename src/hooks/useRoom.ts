@@ -16,6 +16,7 @@ import {
   guestLeave,
   hostStart,
   hostStop,
+  kickParticipant,
   onNetEvent,
   runningInTauri,
   sendMessage,
@@ -105,6 +106,17 @@ export function useRoom() {
     }
   }
 
+  /** (Host) Remove alguém; se der errado, mostra o motivo na conversa. */
+  async function kick(id: number) {
+    try {
+      await kickParticipant(id);
+    } catch (err) {
+      setRoom((r) =>
+        r ? applyEvent(r, { kind: "rejected", reason: errorMessage(err) }) : r,
+      );
+    }
+  }
+
   async function exit() {
     if (room?.role === "host") await hostStop().catch(() => {});
     else await guestLeave().catch(() => {});
@@ -116,5 +128,5 @@ export function useRoom() {
     setError(null);
   }
 
-  return { room, busy, error, create, join, send, exit, clearError };
+  return { room, busy, error, create, join, send, kick, exit, clearError };
 }

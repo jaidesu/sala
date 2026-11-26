@@ -75,8 +75,10 @@ impl PathKind {
 pub enum NetEvent {
     /// Alguém entrou na sala.
     ParticipantJoined { participant: Participant },
-    /// Alguém saiu (ou caiu).
-    ParticipantLeft { participant: Participant },
+    /// Alguém ficou offline ou voltou (campo `online`).
+    ParticipantUpdated { participant: Participant },
+    /// Alguém saiu. `kicked` = removido pelo Host.
+    ParticipantLeft { participant: Participant, kicked: bool },
     /// Mensagem oficial do chat (já numerada e carimbada pelo Host).
     Chat { message: ChatMessage },
     /// (Convidado) O Host recusou um envio (ex.: rápido demais).
@@ -85,9 +87,15 @@ pub enum NetEvent {
     JoinRefused,
     /// (Convidado) O caminho até o Host mudou (ex.: relay → direto).
     PathChanged { path: PathKind },
+    /// (Convidado) A conexão caiu; tentando reconectar sozinho.
+    Reconnecting,
+    /// (Convidado) Reconectou. Traz a foto atualizada da sala.
+    Resynced { room: RoomSnapshot, path: PathKind },
+    /// (Convidado) O Host removeu você da sala.
+    Kicked,
     /// (Convidado) O Host encerrou a sala.
     RoomClosed,
-    /// (Convidado) A conexão com o Host caiu sem aviso.
+    /// (Convidado) A conexão caiu e não foi possível reconectar.
     Disconnected,
 }
 
@@ -130,7 +138,7 @@ mod tests {
         );
     }
 
-    /// Teste de integração: Host e Convidado de verdade, no mesmo computador,
+    /// Teste de integração: Host e Convidados de verdade, no mesmo computador,
     /// conversando pelo iroh em modo "só rede local" (sem internet/relay).
     mod integracao {
         use std::time::Duration;
@@ -152,6 +160,15 @@ mod tests {
 
         type Eventos = mpsc::UnboundedReceiver<NetEvent>;
 
+        /// Um Convidado que entrou: a participação, a foto inicial, o caminho
+        /// e os eventos que ele recebe.
+        struct Entrada {
+            guest: Guest,
+            sala: RoomSnapshot,
+            caminho: PathKind,
+            eventos: Eventos,
+        }
+
         fn senha(s: &str) -> Zeroizing<String> {
             Zeroizing::new(s.to_string())
         }
@@ -164,19 +181,20 @@ mod tests {
             (host, rx)
         }
 
-        async fn entrar(
-            invite: &Invite,
-            pw: &str,
-            apelido: &str,
-        ) -> anyhow::Result<(Guest, RoomSnapshot, Eventos)> {
-            let (tx, rx) = mpsc::unbounded_channel();
-            let (guest, snapshot) = timeout(
+        async fn entrar(invite: &Invite, pw: &str, apelido: &str) -> anyhow::Result<Entrada> {
+            let (tx, eventos) = mpsc::unbounded_channel();
+            let (guest, sala, caminho) = timeout(
                 LIMITE,
                 Guest::connect(NetMode::LocalOnly, invite, senha(pw), apelido, tx),
             )
             .await
             .expect("tentativa demorou demais")?;
-            Ok((guest, snapshot, rx))
+            Ok(Entrada {
+                guest,
+                sala,
+                caminho,
+                eventos,
+            })
         }
 
         /// Próximo evento, pulando avisos de caminho (que chegam a qualquer hora).
@@ -205,60 +223,141 @@ mod tests {
 
             // O convite passa por texto, como aconteceria de verdade.
             let invite = Invite::decode(&host.invite().encode()).unwrap();
-            let (mut ana, snap, mut ana_rx) = entrar(&invite, SENHA, "Ana").await.unwrap();
-            assert_eq!(snap.me.nickname, "Ana");
-            assert_eq!(snap.participants.len(), 2); // Host + Ana
-            assert!(snap.history.is_empty());
+            let mut ana = entrar(&invite, SENHA, "Ana").await.unwrap();
+            assert_eq!(ana.sala.me.nickname, "Ana");
+            assert_eq!(ana.sala.participants.len(), 2); // Host + Ana
+            assert!(ana.sala.history.is_empty());
             // Sem relay, o único caminho possível é o direto.
-            assert_eq!(ana.path(), PathKind::Direct);
+            assert_eq!(ana.caminho, PathKind::Direct);
             assert!(matches!(
                 proximo_evento(&mut host_rx).await,
                 NetEvent::ParticipantJoined { participant } if participant.nickname == "Ana"
             ));
 
             // Ana fala: volta para ela (confirmação) e chega ao Host.
-            ana.send("oi, gente").await.unwrap();
-            assert_eq!(proximo_texto(&mut ana_rx).await, "oi, gente");
+            ana.guest.send("oi, gente").await.unwrap();
+            assert_eq!(proximo_texto(&mut ana.eventos).await, "oi, gente");
             assert_eq!(proximo_texto(&mut host_rx).await, "oi, gente");
 
             // O Host fala: chega para a Ana.
             host.send("bem-vinda!").unwrap();
-            assert_eq!(proximo_texto(&mut ana_rx).await, "bem-vinda!");
+            assert_eq!(proximo_texto(&mut ana.eventos).await, "bem-vinda!");
             assert_eq!(proximo_texto(&mut host_rx).await, "bem-vinda!");
 
             // Bia entra e recebe o histórico; Ana é avisada.
-            let (bia, snap_bia, _bia_rx) = entrar(&invite, SENHA, "Bia").await.unwrap();
-            let textos: Vec<_> = snap_bia.history.iter().map(|m| m.text.as_str()).collect();
+            let bia = entrar(&invite, SENHA, "Bia").await.unwrap();
+            let textos: Vec<_> = bia.sala.history.iter().map(|m| m.text.as_str()).collect();
             assert_eq!(textos, ["oi, gente", "bem-vinda!"]);
-            assert_eq!(snap_bia.participants.len(), 3);
+            assert_eq!(bia.sala.participants.len(), 3);
             assert!(matches!(
-                proximo_evento(&mut ana_rx).await,
+                proximo_evento(&mut ana.eventos).await,
                 NetEvent::ParticipantJoined { participant } if participant.nickname == "Bia"
             ));
 
-            // Bia sai; Ana e Host são avisados.
-            bia.leave().await;
+            // Bia sai de propósito: some da sala na hora (não fica "offline").
+            bia.guest.leave().await;
             assert!(matches!(
-                proximo_evento(&mut ana_rx).await,
-                NetEvent::ParticipantLeft { participant } if participant.nickname == "Bia"
+                proximo_evento(&mut ana.eventos).await,
+                NetEvent::ParticipantLeft { participant, kicked: false }
+                    if participant.nickname == "Bia"
             ));
 
             // O Host encerra: Ana recebe o aviso.
             host.stop().await;
-            assert_eq!(proximo_evento(&mut ana_rx).await, NetEvent::RoomClosed);
-            ana.leave().await;
+            assert_eq!(proximo_evento(&mut ana.eventos).await, NetEvent::RoomClosed);
+            ana.guest.leave().await;
+        }
+
+        #[tokio::test]
+        async fn host_expulsa_convidado() {
+            let (host, mut host_rx) = abrir_sala().await;
+            let invite = host.invite().clone();
+            let mut ana = entrar(&invite, SENHA, "Ana").await.unwrap();
+            let mut bia = entrar(&invite, SENHA, "Bia").await.unwrap();
+            // Ana vê a Bia entrar.
+            assert!(matches!(
+                proximo_evento(&mut ana.eventos).await,
+                NetEvent::ParticipantJoined { .. }
+            ));
+            let _ = proximo_evento(&mut host_rx).await; // Ana entrou
+            let _ = proximo_evento(&mut host_rx).await; // Bia entrou
+
+            host.kick(bia.sala.me.id).unwrap();
+
+            // Bia é avisada e para de receber.
+            assert_eq!(proximo_evento(&mut bia.eventos).await, NetEvent::Kicked);
+            // Ana e o Host veem a saída marcada como expulsão.
+            assert!(matches!(
+                proximo_evento(&mut ana.eventos).await,
+                NetEvent::ParticipantLeft { participant, kicked: true }
+                    if participant.nickname == "Bia"
+            ));
+            assert!(matches!(
+                proximo_evento(&mut host_rx).await,
+                NetEvent::ParticipantLeft { kicked: true, .. }
+            ));
+            // Bia não consegue mais mandar mensagens.
+            assert!(bia.guest.send("ainda estou aqui?").await.is_err());
+            // Expulsar de novo dá erro (já saiu).
+            assert!(host.kick(bia.sala.me.id).is_err());
+
+            ana.guest.leave().await;
+            host.stop().await;
+        }
+
+        #[tokio::test]
+        async fn convidado_reconecta_sozinho_apos_queda() {
+            let (host, mut host_rx) = abrir_sala().await;
+            let invite = host.invite().clone();
+            let mut ana = entrar(&invite, SENHA, "Ana").await.unwrap();
+            let id_ana = ana.sala.me.id;
+            let _ = proximo_evento(&mut host_rx).await; // Ana entrou
+
+            // Enquanto a Ana está fora, o Host manda uma mensagem.
+            host.drop_connection(id_ana);
+            assert_eq!(proximo_evento(&mut ana.eventos).await, NetEvent::Reconnecting);
+            host.send("mensagem durante a queda").unwrap();
+
+            // Ana volta sozinha, como a mesma pessoa, e recebe o que perdeu.
+            match proximo_evento(&mut ana.eventos).await {
+                NetEvent::Resynced { room, .. } => {
+                    assert_eq!(room.me.id, id_ana);
+                    assert_eq!(room.me.nickname, "Ana");
+                    assert!(room.history.iter().any(|m| m.text == "mensagem durante a queda"));
+                }
+                outro => panic!("esperava Resynced, veio {outro:?}"),
+            }
+
+            // Para o Host, a Ana voltou a ficar online (sem ter "saído").
+            loop {
+                match proximo_evento(&mut host_rx).await {
+                    NetEvent::ParticipantUpdated { participant } if participant.online => {
+                        assert_eq!(participant.id, id_ana);
+                        break;
+                    }
+                    NetEvent::ParticipantUpdated { .. } | NetEvent::Chat { .. } => continue,
+                    outro => panic!("evento inesperado no Host: {outro:?}"),
+                }
+            }
+
+            // E a conversa continua normalmente.
+            ana.guest.send("voltei!").await.unwrap();
+            assert_eq!(proximo_texto(&mut ana.eventos).await, "voltei!");
+
+            ana.guest.leave().await;
+            host.stop().await;
         }
 
         #[tokio::test]
         async fn apelido_repetido_ganha_numero() {
             let (host, _host_rx) = abrir_sala().await;
             let invite = host.invite().clone();
-            let (a, s1, _) = entrar(&invite, SENHA, "Ana").await.unwrap();
-            let (b, s2, _) = entrar(&invite, SENHA, "ana").await.unwrap();
-            assert_eq!(s1.me.nickname, "Ana");
-            assert_eq!(s2.me.nickname, "ana (2)");
-            a.leave().await;
-            b.leave().await;
+            let a = entrar(&invite, SENHA, "Ana").await.unwrap();
+            let b = entrar(&invite, SENHA, "ana").await.unwrap();
+            assert_eq!(a.sala.me.nickname, "Ana");
+            assert_eq!(b.sala.me.nickname, "ana (2)");
+            a.guest.leave().await;
+            b.guest.leave().await;
             host.stop().await;
         }
 
@@ -266,15 +365,15 @@ mod tests {
         async fn mensagens_rapidas_demais_sao_recusadas() {
             let (host, _host_rx) = abrir_sala().await;
             let invite = host.invite().clone();
-            let (mut ana, _, mut ana_rx) = entrar(&invite, SENHA, "Ana").await.unwrap();
+            let mut ana = entrar(&invite, SENHA, "Ana").await.unwrap();
 
             for i in 0..15 {
-                ana.send(&format!("spam {i}")).await.unwrap();
+                ana.guest.send(&format!("spam {i}")).await.unwrap();
             }
             let mut recusadas = 0;
             let mut aceitas = 0;
             while recusadas + aceitas < 15 {
-                match proximo_evento(&mut ana_rx).await {
+                match proximo_evento(&mut ana.eventos).await {
                     NetEvent::Chat { .. } => aceitas += 1,
                     NetEvent::Rejected { .. } => recusadas += 1,
                     outro => panic!("evento inesperado: {outro:?}"),
@@ -285,7 +384,7 @@ mod tests {
                 "o limite de ritmo deveria ter recusado algo"
             );
             assert!(aceitas >= 10, "a rajada inicial deveria passar");
-            ana.leave().await;
+            ana.guest.leave().await;
             host.stop().await;
         }
 
@@ -314,12 +413,12 @@ mod tests {
             assert_eq!(proximo_evento(&mut host_rx).await, NetEvent::JoinRefused);
 
             // E quem sabe a senha continua entrando normalmente.
-            let (guest, _, _) = entrar(&invite, SENHA, "Ana").await.unwrap();
+            let ana = entrar(&invite, SENHA, "Ana").await.unwrap();
             assert!(matches!(
                 proximo_evento(&mut host_rx).await,
                 NetEvent::ParticipantJoined { .. }
             ));
-            guest.leave().await;
+            ana.guest.leave().await;
             host.stop().await;
         }
 

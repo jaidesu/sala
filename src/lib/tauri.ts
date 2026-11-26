@@ -30,6 +30,8 @@ export interface Participant {
   id: number;
   nickname: string;
   isHost: boolean;
+  /** `false` enquanto a conexão da pessoa está caída (esperando voltar). */
+  online: boolean;
 }
 
 export interface ChatMessage {
@@ -61,11 +63,15 @@ export interface GuestJoined {
 /** `NetEvent` do Rust (o campo `kind` diz qual é). */
 export type NetEvent =
   | { kind: "participantJoined"; participant: Participant }
-  | { kind: "participantLeft"; participant: Participant }
+  | { kind: "participantUpdated"; participant: Participant }
+  | { kind: "participantLeft"; participant: Participant; kicked: boolean }
   | { kind: "chat"; message: ChatMessage }
   | { kind: "rejected"; reason: string }
   | { kind: "joinRefused" }
   | { kind: "pathChanged"; path: PathKind }
+  | { kind: "reconnecting" }
+  | { kind: "resynced"; room: RoomSnapshot; path: PathKind }
+  | { kind: "kicked" }
   | { kind: "roomClosed" }
   | { kind: "disconnected" };
 
@@ -114,6 +120,11 @@ export function guestJoin(
 /** Sai da sala. */
 export function guestLeave(): Promise<void> {
   return invoke("guest_leave");
+}
+
+/** (Host) Remove um participante da sala. */
+export function kickParticipant(id: number): Promise<void> {
+  return invoke("kick_participant", { id });
 }
 
 /** Envia uma mensagem na sala atual (Host ou Convidado). */

@@ -42,6 +42,7 @@ export default function MessageInput({
           }
         }}
         disabled={disabled}
+        autoFocus
         maxLength={MAX_MESSAGE_CHARS}
         rows={1}
         placeholder={disabled ? "Sala encerrada" : "Escreva uma mensagem…"}

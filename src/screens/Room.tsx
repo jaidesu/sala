@@ -40,6 +40,13 @@ export default function Room({ view, onSend, onExit }: RoomProps) {
     }
   }
 
+  const others = view.participants.filter((p) => p.id !== view.me.id).length;
+  const emptyHint = isHost
+    ? others === 0
+      ? "Ninguém entrou ainda. Copie o convite e mande a senha por outro canal."
+      : "Ninguém disse nada ainda. Que tal começar?"
+    : "Ninguém disse nada ainda. Que tal começar?";
+
   const exitLabel = view.ended
     ? "Voltar ao início"
     : confirming
@@ -55,6 +62,15 @@ export default function Room({ view, onSend, onExit }: RoomProps) {
       <header className="flex items-center gap-3 border-b border-zinc-800 px-4 py-3">
         <h1 className="text-lg font-semibold">Sala</h1>
         {view.connection && <ConnectionBadge state={view.connection} />}
+        {isHost && (
+          <span
+            title="Os convidados conectam direto ao seu computador."
+            className="inline-flex items-center gap-2 rounded-full border border-zinc-800 bg-zinc-900 px-3 py-1 text-sm"
+          >
+            <span className="h-2 w-2 rounded-full bg-emerald-400" />
+            Sala online · {others} {others === 1 ? "convidado" : "convidados"}
+          </span>
+        )}
         {isHost && (
           <button
             type="button"
@@ -78,15 +94,21 @@ export default function Room({ view, onSend, onExit }: RoomProps) {
         </button>
       </header>
 
-      {isHost && (
-        <p className="border-b border-zinc-900 bg-zinc-900/50 px-4 py-1.5 text-xs text-zinc-500">
-          Mantenha o app aberto e o computador ligado: a sala só existe enquanto você estiver aqui.
+      {isHost && !view.ended && (
+        <p className="border-b border-amber-900/50 bg-amber-950/40 px-4 py-1.5 text-xs text-amber-200">
+          A sala vive no seu computador: mantenha o app aberto e não deixe o computador
+          suspender (desligue a suspensão automática enquanto a sala estiver aberta).
+        </p>
+      )}
+      {view.ended && (
+        <p className="border-b border-zinc-800 bg-zinc-900 px-4 py-1.5 text-xs text-zinc-400">
+          A sala acabou. O histórico existia só na memória do Host e foi descartado.
         </p>
       )}
 
       <div className="flex min-h-0 flex-1">
         <section className="flex min-w-0 flex-1 flex-col">
-          <MessageList items={view.timeline} myId={view.me.id} />
+          <MessageList items={view.timeline} myId={view.me.id} emptyHint={emptyHint} />
           <MessageInput disabled={view.ended} onSend={onSend} />
         </section>
         <ParticipantList participants={view.participants} myId={view.me.id} />

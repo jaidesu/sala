@@ -67,6 +67,29 @@ export default function Home({ onCreate, onJoin }: HomeProps) {
         </label>
       </div>
 
+      <details className="w-full max-w-md text-sm text-zinc-400">
+        <summary className="cursor-pointer text-center text-zinc-500 hover:text-zinc-300">
+          Como sua privacidade é protegida?
+        </summary>
+        <ul className="mt-3 list-disc space-y-1 pl-5 text-xs leading-relaxed">
+          <li>
+            As mensagens vão cifradas de ponta a ponta e ficam só na memória do computador
+            de quem criou a sala. Nada é salvo em servidor.
+          </li>
+          <li>
+            A senha nunca trafega pela rede. Quem tem só o convite não entra.
+          </li>
+          <li>
+            Quando a conexão direta não é possível, os dados passam por um servidor{" "}
+            <em>relay</em>. Ele vê <strong>que</strong> há tráfego entre dois computadores,
+            mas não <strong>o quê</strong>.
+          </li>
+          <li>
+            Quem cria a sala vê todas as mensagens, e qualquer participante pode copiá-las.
+          </li>
+        </ul>
+      </details>
+
       <footer className="text-xs text-zinc-500">
         {!runningInTauri && "Modo navegador (sem núcleo Rust)"}
         {info &&

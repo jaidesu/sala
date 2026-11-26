@@ -14,7 +14,7 @@ Uma pessoa (o **Host**) cria uma sala no próprio computador; outras pessoas (**
 | 2 | Rede básica com iroh (Host ↔ Convidado, ping) | ✅ testado em redes diferentes |
 | 3 | Senha: Argon2id + SPAKE2, limite de tentativas | ✅ testado manualmente |
 | 4 | Sala e chat: protocolo, histórico, participantes | ✅ testado manualmente |
-| 5 | Interface completa | ⏳ |
+| 5 | Interface completa | ✅ falta teste manual |
 | 6 | Robustez: reconexão, expulsão, encerramento | ⏳ |
 | 7 | Instaladores e releases | ⏳ |
 
@@ -34,8 +34,10 @@ Uma pessoa (o **Host**) cria uma sala no próprio computador; outras pessoas (**
 src/                  Interface (React)
 ├── screens/          Telas (Home, CreateRoom, JoinRoom, Room)
 ├── components/       MessageList, MessageInput, ParticipantList, ConnectionBadge, PasswordMeter
+├── hooks/useRoom.ts  Escuta os eventos de rede e expõe a sala + ações (criar, entrar, enviar, sair)
 ├── lib/tauri.ts      Única ponte com o núcleo Rust (invoke/listen tipados)
 ├── lib/room.ts       Estado da sala na interface e como cada evento o altera
+├── lib/demo.ts       Sala de exemplo para o modo demonstração (?demo)
 ├── lib/password.ts   Estimativa de força da senha (medidor)
 src-tauri/            Núcleo (Rust)
 ├── src/lib.rs        Monta o app e registra os comandos
@@ -114,7 +116,7 @@ npm install
 npm run dev
 ```
 
-Abra http://localhost:1420.
+Abra http://localhost:1420. Para ver a tela da sala com mensagens de exemplo, abra http://localhost:1420/?demo (o modo demonstração só existe fora do app).
 
 ### Localmente, com Rust (opcional)
 

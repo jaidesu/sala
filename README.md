@@ -14,7 +14,7 @@ Uma pessoa (o **Host**) cria uma sala no próprio computador; outras pessoas (**
 | 2 | Rede básica com iroh (Host ↔ Convidado, ping) | ✅ testado em redes diferentes |
 | 3 | Senha: Argon2id + SPAKE2, limite de tentativas | ✅ testado manualmente |
 | 4 | Sala e chat: protocolo, histórico, participantes | ✅ testado manualmente |
-| 5 | Interface completa | ✅ falta teste manual |
+| 5 | Interface completa | ✅ testado manualmente |
 | 6 | Robustez: reconexão, expulsão, encerramento | ⏳ |
 | 7 | Instaladores e releases | ⏳ |
 

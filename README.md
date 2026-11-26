@@ -12,7 +12,7 @@ Uma pessoa (o **Host**) cria uma sala no próprio computador; outras pessoas (**
 |---|---|---|
 | 1 | Setup: Tauri 2 + React/TS/Vite/Tailwind, CI para os 3 sistemas | ✅ |
 | 2 | Rede básica com iroh (Host ↔ Convidado, ping) | ✅ testado em redes diferentes |
-| 3 | Senha: Argon2id + SPAKE2, limite de tentativas | ⏳ |
+| 3 | Senha: Argon2id + SPAKE2, limite de tentativas | ✅ falta teste manual |
 | 4 | Sala e chat: protocolo, histórico, participantes | ⏳ |
 | 5 | Interface completa | ⏳ |
 | 6 | Robustez: reconexão, expulsão, encerramento | ⏳ |
@@ -32,33 +32,36 @@ Uma pessoa (o **Host**) cria uma sala no próprio computador; outras pessoas (**
 
 ```
 src/                  Interface (React)
-├── screens/          Telas (Home, HostTest, GuestTest)
-├── components/       ConnectionBadge (direta / via relay / desconectado)
+├── screens/          Telas (Home, CreateRoom, HostTest, GuestTest)
+├── components/       ConnectionBadge, PasswordMeter
 ├── lib/tauri.ts      Única ponte com o núcleo Rust (invoke/listen tipados)
+├── lib/password.ts   Estimativa de força da senha (medidor)
 src-tauri/            Núcleo (Rust)
 ├── src/lib.rs        Monta o app e registra os comandos
 ├── src/commands.rs   Comandos chamados pela interface
-├── src/protocol/     Mensagens (Hello/Ping/Pong) e framing com prefixo de tamanho
+├── src/protocol/     Mensagens (Hello, PakeMsg, PakeConfirm, Ping/Pong) e framing
 ├── src/room/         Convite (endereço do Host + id da sala)
-├── src/net/          iroh: endpoint, Host (aceita) e Convidado (conecta)
+├── src/net/          iroh: endpoint, Host, Convidado e handshake de senha (auth)
+├── src/crypto/       Argon2id + SPAKE2, limite de tentativas, geração de senha
 ├── tauri.conf.json   Janela, CSP, empacotamento
 └── capabilities/     Permissões da WebView (mínimas)
 .github/workflows/    Compilação na nuvem (CI, build Windows, release)
 ```
 
-## Teste manual da conexão (fase 2)
+## Teste manual (fases 2 e 3)
 
-Nesta fase ainda não há senha nem chat: só abrir a sala, conectar e medir a latência ("ping").
+Ainda não há chat: só abrir a sala com senha, conectar e medir a latência ("ping").
 
 **Preparação:** baixe o `sala.exe` mais recente (veja "Para baixar o `.exe`" abaixo) nos dois computadores.
 
-1. **Mesmo computador (teste rápido):** abra o `sala.exe` duas vezes. Na primeira, **Criar sala** → **Copiar convite**. Na segunda, **Entrar em uma sala** → cole o convite → **Conectar** → **Ping**. A janela do Host deve mostrar o Convidado em "Conectados".
-2. **Duas redes diferentes (o teste que importa):** um computador na rede de casa e o outro no **4G do celular** (roteando a internet pelo celular). Repita os passos, mandando o convite por um app de mensagens.
+1. **Mesmo computador (teste rápido):** abra o `sala.exe` duas vezes. Na primeira, **Criar sala** → **Gerar senha forte** (ou digite uma) → **Criar sala** → **Copiar convite**. Na segunda, **Entrar em uma sala** → cole o convite → digite a senha → **Conectar** → **Ping**. A janela do Host deve mostrar o Convidado em "Conectados". Criar e entrar levam ~1 s a mais que antes: é o Argon2id trabalhando.
+2. **Senha errada:** tente entrar com uma senha errada. O Convidado vê só "Não foi possível entrar na sala…" (sem dizer o motivo) e o Host vê "tentativa de entrada recusada" na Atividade. Depois de 5 erros, novas tentativas (até com a senha certa) são recusadas por alguns segundos, e a espera dobra a cada novo erro.
+3. **Duas redes diferentes:** um computador na rede de casa e o outro no **4G do celular** (roteando a internet pelo celular). Repita os passos, mandando o convite por um app de mensagens e a senha por outro canal.
    - O selo deve mostrar **"Via relay"** no início e, em geral, mudar para **"Conexão direta"** em alguns segundos (hole punching).
    - Se ficar em "Via relay", também está certo: alguns tipos de NAT/CGNAT impedem a conexão direta. Os dados continuam cifrados.
    - O ping via relay costuma ser maior (dezenas a centenas de ms) que o direto.
-3. **Sem internet (opcional):** marque **"Só rede local (sem relay)"** nos dois lados, com os dois computadores na mesma rede Wi-Fi/cabo.
-4. **Casos de erro:** feche a sala no Host → o Convidado deve mostrar "Desconectado". Cole um convite cortado → deve aparecer uma mensagem de convite inválido.
+4. **Sem internet (opcional):** marque **"Só rede local (sem relay)"** nos dois lados, com os dois computadores na mesma rede Wi-Fi/cabo.
+5. **Casos de erro:** feche a sala no Host → o Convidado deve mostrar "Desconectado". Cole um convite cortado → deve aparecer uma mensagem de convite inválido.
 
 > O Windows pode pedir permissão de rede no firewall na primeira vez; permita para redes privadas.
 
@@ -118,6 +121,23 @@ npm run tauri dev
 **Metadados:** os relays do iroh conseguem ver *que* dois computadores estão trocando dados (e quando), mas não *o quê*. Ao conectar, os computadores trocam seus endereços IP para tentar a conexão direta, então os participantes de uma sala podem ver o IP uns dos outros.
 
 **Convite:** no modo normal, o convite contém só a chave pública do Host, o servidor relay e o identificador da sala, **sem o IP do Host**. No modo "só rede local", ele contém os IPs locais. A chave pública do Host garante que o Convidado está falando com o Host verdadeiro: a conexão só abre se o Host provar que tem a chave privada correspondente.
+
+### Como a senha é verificada
+
+A senha **nunca trafega pela rede** e quem grava o tráfego **não consegue testar senhas depois** (ataque de dicionário offline):
+
+1. **Argon2id** (64 MiB, 3 passadas; sal = id da sala) transforma a senha em 32 bytes, de forma propositalmente lenta.
+2. **SPAKE2** (crate `spake2`): cada lado envia uma mensagem de 33 bytes; os dois chegam à mesma chave só se a senha for a mesma. Cada palpite exige uma conversa nova com o Host.
+3. **Amarração à conexão:** o handshake inclui as chaves públicas do Host e do Convidado, o id da sala e um valor exportado da sessão TLS (RFC 5705). Mensagens capturadas de uma conexão não servem em outra.
+4. **Confirmação de chave (HMAC-SHA256):** o Convidado prova primeiro; o Host só responde se a prova estiver certa.
+5. **Limite de tentativas no Host:** 5 erros livres; depois, bloqueio de 2 s que dobra a cada erro (até 5 min); no máximo 3 handshakes simultâneos; a contagem zera após 15 min sem erros. Em caso de falha, o Convidado recebe sempre a mesma mensagem genérica.
+
+**Sem camada extra de cifragem:** o SPEC previa cifrar cada mensagem de novo com ChaCha20-Poly1305. Decidimos não fazer: o QUIC do iroh já cifra tudo com TLS 1.3 ponta a ponta, e a senha já é garantida pelos passos acima. Uma segunda camada seria código a mais, com risco a mais, sem proteção nova.
+
+**Limitações conhecidas:**
+- O limite de tentativas vale para a sala inteira (um atacante pode trocar de identidade à vontade). Então, durante um ataque, convidados legítimos também podem ter que esperar.
+- A documentação do `spake2` avisa que ele provavelmente não roda em tempo constante. Pela rede, a variação de tempo é muito menor que a latência, e o limite de tentativas restringe o número de medições. Fica registrado.
+- O medidor de força é uma estimativa simples. Senhas escolhidas por pessoas costumam ser mais fracas do que parecem; prefira a senha gerada (16 caracteres aleatórios, ~79 bits).
 
 **Regras do projeto:** sem telemetria; senhas, chaves e mensagens nunca vão para logs; mensagens são exibidas como texto puro (nunca HTML); a WebView tem CSP restritiva e permissões mínimas.
 

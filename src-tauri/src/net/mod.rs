@@ -144,9 +144,12 @@ mod tests {
 
         async fn entrar(invite: &Invite, pw: &str) -> anyhow::Result<Guest> {
             let (tx, _rx) = mpsc::unbounded_channel();
-            timeout(LIMITE, Guest::connect(NetMode::LocalOnly, invite, senha(pw), tx))
-                .await
-                .expect("tentativa demorou demais")
+            timeout(
+                LIMITE,
+                Guest::connect(NetMode::LocalOnly, invite, senha(pw), tx),
+            )
+            .await
+            .expect("tentativa demorou demais")
         }
 
         async fn proximo_evento(rx: &mut mpsc::UnboundedReceiver<NetEvent>) -> NetEvent {

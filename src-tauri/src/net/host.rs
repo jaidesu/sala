@@ -174,10 +174,7 @@ async fn serve_guest(conn: Connection, room: Arc<RoomAuth>, events: UnboundedSen
 }
 
 /// Decide se o Convidado entra. Devolve os streams prontos para uso.
-async fn admit(
-    conn: &Connection,
-    room: &RoomAuth,
-) -> Result<(SendStream, RecvStream), Refusal> {
+async fn admit(conn: &Connection, room: &RoomAuth) -> Result<(SendStream, RecvStream), Refusal> {
     let (mut send, mut recv) = receive_hello(conn, room.room_id)
         .await
         .map_err(|_| Refusal::Protocol)?;

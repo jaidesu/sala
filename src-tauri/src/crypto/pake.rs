@@ -237,13 +237,19 @@ mod tests {
     #[test]
     fn mesma_senha_confirma_dos_dois_lados() {
         let ctx = contexto();
-        assert_eq!(handshake("cavalo bateria", "cavalo bateria", &ctx, &ctx), (true, true));
+        assert_eq!(
+            handshake("cavalo bateria", "cavalo bateria", &ctx, &ctx),
+            (true, true)
+        );
     }
 
     #[test]
     fn senha_errada_falha_dos_dois_lados() {
         let ctx = contexto();
-        assert_eq!(handshake("cavalo bateria", "cavalo baterla", &ctx, &ctx), (false, false));
+        assert_eq!(
+            handshake("cavalo bateria", "cavalo baterla", &ctx, &ctx),
+            (false, false)
+        );
     }
 
     #[test]
@@ -252,7 +258,10 @@ mod tests {
         let ctx = contexto();
         let mut outro = contexto();
         outro.channel_binding = [9; 32];
-        assert_eq!(handshake("senha certa!", "senha certa!", &ctx, &outro), (false, false));
+        assert_eq!(
+            handshake("senha certa!", "senha certa!", &ctx, &outro),
+            (false, false)
+        );
     }
 
     #[test]

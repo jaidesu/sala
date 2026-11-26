@@ -87,9 +87,7 @@ impl AttemptLimiter {
         if self.failures > FREE_FAILURES {
             // 2^0, 2^1, 2^2... vezes o atraso base, limitado a MAX_DELAY.
             let exponent = (self.failures - FREE_FAILURES - 1).min(16);
-            let delay = BASE_DELAY
-                .saturating_mul(1 << exponent)
-                .min(MAX_DELAY);
+            let delay = BASE_DELAY.saturating_mul(1 << exponent).min(MAX_DELAY);
             self.blocked_until = Some(now + delay);
         }
     }

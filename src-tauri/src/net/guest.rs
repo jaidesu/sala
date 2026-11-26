@@ -10,12 +10,14 @@ use iroh::{
 use n0_future::StreamExt;
 use serde::Serialize;
 use tokio::{sync::mpsc::UnboundedSender, task::JoinHandle, time::timeout};
+use zeroize::Zeroizing;
 
 use super::{
-    HANDSHAKE_TIMEOUT, NetEvent, PathKind,
+    HANDSHAKE_TIMEOUT, NetEvent, PathKind, auth,
     endpoint::{self, ALPN, NetMode},
 };
 use crate::{
+    crypto::pake::{self, Role, StretchedPassword},
     protocol::{PROTOCOL_VERSION, messages::Message, recv_msg, send_msg},
     room::invite::Invite,
 };
@@ -25,9 +27,14 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 /// Quanto esperar a resposta de um ping.
 const PING_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// Mensagem mostrada quando não dá para conectar. Genérica de propósito.
+/// Não deu nem para falar com o Host (offline, convite antigo, rede).
 const CONNECT_FAILED: &str = "Não foi possível conectar ao Host. Confira o convite e se o Host \
      está com a sala aberta.";
+
+/// Falamos com o Host, mas ele não deixou entrar. Genérica de propósito: não
+/// diz se foi a senha, o limite de tentativas ou outra coisa.
+const JOIN_FAILED: &str = "Não foi possível entrar na sala. Confira a senha e tente de novo \
+     em alguns instantes.";
 
 /// Resultado de um ping.
 #[derive(Debug, Clone, Copy, Serialize)]
@@ -50,14 +57,22 @@ pub struct Guest {
 }
 
 impl Guest {
-    /// Conecta ao Host do convite e faz o handshake.
+    /// Conecta ao Host do convite e faz o handshake (incluindo a senha).
     pub async fn connect(
         mode: NetMode,
         invite: &Invite,
+        password: Zeroizing<String>,
         events: UnboundedSender<NetEvent>,
     ) -> Result<Self> {
+        // Argon2id antes de conectar (~1 s), numa thread separada.
+        let room_id = invite.room_id;
+        let stretched =
+            tokio::task::spawn_blocking(move || pake::stretch_password(&password, &room_id))
+                .await
+                .map_err(|_| anyhow!("falha interna ao preparar a senha"))??;
+
         let endpoint = endpoint::bind(mode, false).await?;
-        match Self::open(&endpoint, invite).await {
+        match Self::open(&endpoint, invite, &stretched).await {
             Ok((conn, send, recv)) => {
                 let path_task = tokio::spawn(watch_path(conn.clone(), events));
                 Ok(Self {
@@ -79,6 +94,7 @@ impl Guest {
     async fn open(
         endpoint: &Endpoint,
         invite: &Invite,
+        stretched: &StretchedPassword,
     ) -> Result<(Connection, SendStream, RecvStream)> {
         // 1. Conexão QUIC. O iroh tenta conexão direta e, se não der, usa o relay.
         //    A conexão só abre se o Host provar que é dono da chave do convite.
@@ -104,13 +120,27 @@ impl Guest {
         // 4. O Host responde Hello se aceitou; se recusou, fecha a conexão.
         let reply = timeout(HANDSHAKE_TIMEOUT, recv_msg::<_, Message>(&mut recv))
             .await
-            .map_err(|_| anyhow!(CONNECT_FAILED))?
-            .map_err(|_| anyhow!("O Host recusou a conexão."))?;
+            .map_err(|_| anyhow!(JOIN_FAILED))?
+            .map_err(|_| anyhow!(JOIN_FAILED))?;
         match reply {
             Message::Hello { version, .. } if version == PROTOCOL_VERSION => {}
             Message::Hello { .. } => bail!("O Host usa outra versão do Sala. Atualizem o app."),
-            _ => bail!(CONNECT_FAILED),
+            _ => bail!(JOIN_FAILED),
         }
+
+        // 5. Handshake de senha. `remote_id` é a chave do Host já verificada
+        //    pelo TLS; `endpoint.id()` é a nossa.
+        let host_id = *conn.remote_id().as_bytes();
+        let guest_id = *endpoint.id().as_bytes();
+        let ctx = auth::context(&conn, invite.room_id, host_id, guest_id)
+            .map_err(|_| anyhow!(JOIN_FAILED))?;
+        timeout(
+            HANDSHAKE_TIMEOUT,
+            auth::run(&mut send, &mut recv, stretched, &ctx, Role::Guest),
+        )
+        .await
+        .map_err(|_| anyhow!(JOIN_FAILED))?
+        .map_err(|_| anyhow!(JOIN_FAILED))?;
 
         Ok((conn, send, recv))
     }

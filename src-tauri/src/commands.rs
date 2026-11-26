@@ -11,8 +11,10 @@
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, State};
 use tokio::sync::{Mutex, mpsc};
+use zeroize::Zeroizing;
 
 use crate::{
+    crypto::password,
     net::{
         NetEvent, PathKind,
         endpoint::NetMode,
@@ -70,19 +72,30 @@ fn event_channel(app: AppHandle) -> mpsc::UnboundedSender<NetEvent> {
     tx
 }
 
+/// Gera uma senha forte (ex.: `k7mq-x2pd-9tfa-wr4h`).
+#[tauri::command]
+pub fn generate_password() -> String {
+    password::generate()
+}
+
 /// Abre uma sala e devolve o convite (texto para copiar).
+///
+/// A senha chega como `String` e é embrulhada em `Zeroizing` na hora, para ser
+/// apagada da memória assim que o Argon2id terminar.
 #[tauri::command]
 pub async fn host_start(
     mode: NetMode,
+    password: String,
     app: AppHandle,
     state: State<'_, NetState>,
 ) -> Result<String, String> {
+    let password = Zeroizing::new(password);
     let mut slot = state.host.lock().await;
     // Se já havia uma sala aberta, fecha antes de abrir outra.
     if let Some(old) = slot.take() {
         old.stop().await;
     }
-    let host = Host::start(mode, event_channel(app))
+    let host = Host::start(mode, password, event_channel(app))
         .await
         .map_err(|e| e.to_string())?;
     let invite = host.invite().encode();
@@ -103,16 +116,18 @@ pub async fn host_stop(state: State<'_, NetState>) -> Result<(), String> {
 #[tauri::command]
 pub async fn guest_join(
     invite: String,
+    password: String,
     mode: NetMode,
     app: AppHandle,
     state: State<'_, NetState>,
 ) -> Result<PathKind, String> {
+    let password = Zeroizing::new(password);
     let invite = Invite::decode(&invite).map_err(|e| e.to_string())?;
     let mut slot = state.guest.lock().await;
     if let Some(old) = slot.take() {
         old.leave().await;
     }
-    let guest = Guest::connect(mode, &invite, event_channel(app))
+    let guest = Guest::connect(mode, &invite, password, event_channel(app))
         .await
         .map_err(|e| e.to_string())?;
     let path = guest.path();

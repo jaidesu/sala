@@ -9,9 +9,10 @@
 //! - `protocol` — formato das mensagens trocadas entre Host e Convidados.
 //! - `net`      — endpoint iroh, lado Host e lado Convidado.
 //! - `room`     — convite (e, na fase 4, participantes e histórico).
-//! - `crypto`   — (fase 3) Argon2id + SPAKE2 e chaves de sessão.
+//! - `crypto`   — Argon2id + SPAKE2, limite de tentativas, geração de senha.
 
 mod commands;
+mod crypto;
 mod net;
 mod protocol;
 mod room;
@@ -25,6 +26,7 @@ pub fn run() {
         // Comando que não está aqui simplesmente não existe para a interface.
         .invoke_handler(tauri::generate_handler![
             commands::app_info,
+            commands::generate_password,
             commands::host_start,
             commands::host_stop,
             commands::guest_join,

@@ -29,8 +29,26 @@ n0-future = "0.3"
 anyhow = "1"
 # Codifica o convite como texto copiável.
 base64 = "0.23"
-# Números aleatórios do sistema operacional (para o identificador da sala).
+# Números aleatórios do sistema operacional (id da sala, senha gerada).
 getrandom = "0.4"
+# --- Criptografia (só bibliotecas auditadas/mantidas pelo RustCrypto) ---
+# Argon2id: "estica" a senha, tornando cada tentativa cara de calcular.
+argon2 = { version = "0.6", default-features = false, features = ["alloc", "zeroize"] }
+# SPAKE2: troca de chaves autenticada por senha (a senha não trafega).
+spake2 = "0.4"
+# HMAC-SHA256: prova de que os dois lados chegaram à mesma chave.
+hmac = "0.13"
+sha2 = "0.11"
+# Apaga senhas e chaves da memória quando deixam de ser usadas.
+zeroize = "1"
+
+# O Argon2id sem otimização (modo debug/testes) fica dezenas de vezes mais
+# lento. Otimizamos só essas dependências, mesmo em debug.
+[profile.dev.package.argon2]
+opt-level = 3
+
+[profile.dev.package.blake2]
+opt-level = 3
 
 # Perfil de release otimizado para binário pequeno.
 # Veja: https://tauri.app/concept/size/#cargo-configuration

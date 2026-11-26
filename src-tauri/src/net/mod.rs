@@ -4,11 +4,13 @@
 //!   só rede local).
 //! - `host`: aceita conexões de Convidados.
 //! - `guest`: conecta ao Host a partir de um convite.
+//! - `auth`: handshake de senha (PAKE) sobre os streams da conexão.
 //!
 //! As camadas de cima (comandos Tauri) recebem notificações por um canal
 //! (`mpsc`) de `NetEvent`. Assim este módulo não depende do Tauri e pode ser
 //! testado sozinho.
 
+pub mod auth;
 pub mod endpoint;
 pub mod guest;
 pub mod host;
@@ -73,6 +75,8 @@ pub enum NetEvent {
     GuestConnected { guest: String },
     /// (Host) Um Convidado saiu ou caiu.
     GuestDisconnected { guest: String },
+    /// (Host) Alguém tentou entrar e errou a senha (ou desistiu no meio).
+    JoinRefused,
     /// (Convidado) O caminho até o Host mudou (ex.: relay → direto).
     PathChanged { path: PathKind },
     /// (Convidado) A conexão com o Host acabou.
@@ -111,13 +115,39 @@ mod tests {
     /// Teste de integração: Host e Convidado de verdade, no mesmo computador,
     /// conversando pelo iroh em modo "só rede local" (sem internet/relay).
     mod integracao {
+        use std::time::Duration;
+
         use tokio::sync::mpsc;
         use tokio::time::timeout;
+        use zeroize::Zeroizing;
 
         use super::super::{NetEvent, PathKind, endpoint::NetMode, guest::Guest, host::Host};
-        use crate::room::invite::{Invite, RoomId};
+        use crate::{
+            crypto::limiter::FREE_FAILURES,
+            room::invite::{Invite, RoomId},
+        };
 
-        const LIMITE: std::time::Duration = std::time::Duration::from_secs(30);
+        const LIMITE: Duration = Duration::from_secs(30);
+        const SENHA: &str = "senha-de-teste-123";
+
+        fn senha(s: &str) -> Zeroizing<String> {
+            Zeroizing::new(s.to_string())
+        }
+
+        async fn abrir_sala() -> (Host, mpsc::UnboundedReceiver<NetEvent>) {
+            let (tx, rx) = mpsc::unbounded_channel();
+            let host = Host::start(NetMode::LocalOnly, senha(SENHA), tx)
+                .await
+                .unwrap();
+            (host, rx)
+        }
+
+        async fn entrar(invite: &Invite, pw: &str) -> anyhow::Result<Guest> {
+            let (tx, _rx) = mpsc::unbounded_channel();
+            timeout(LIMITE, Guest::connect(NetMode::LocalOnly, invite, senha(pw), tx))
+                .await
+                .expect("tentativa demorou demais")
+        }
 
         async fn proximo_evento(rx: &mut mpsc::UnboundedReceiver<NetEvent>) -> NetEvent {
             timeout(LIMITE, rx.recv())
@@ -128,20 +158,11 @@ mod tests {
 
         #[tokio::test]
         async fn convidado_conecta_e_faz_ping() {
-            let (host_tx, mut host_rx) = mpsc::unbounded_channel();
-            let host = Host::start(NetMode::LocalOnly, host_tx).await.unwrap();
+            let (host, mut host_rx) = abrir_sala().await;
 
             // O convite passa por texto, como aconteceria de verdade.
             let invite = Invite::decode(&host.invite().encode()).unwrap();
-
-            let (guest_tx, _guest_rx) = mpsc::unbounded_channel();
-            let mut guest = timeout(
-                LIMITE,
-                Guest::connect(NetMode::LocalOnly, &invite, guest_tx),
-            )
-            .await
-            .expect("conexão demorou demais")
-            .unwrap();
+            let mut guest = entrar(&invite, SENHA).await.unwrap();
 
             assert!(matches!(
                 proximo_evento(&mut host_rx).await,
@@ -165,23 +186,58 @@ mod tests {
 
         #[tokio::test]
         async fn convite_de_outra_sala_e_recusado() {
-            let (host_tx, mut host_rx) = mpsc::unbounded_channel();
-            let host = Host::start(NetMode::LocalOnly, host_tx).await.unwrap();
+            let (host, mut host_rx) = abrir_sala().await;
 
             // Mesmo endereço do Host, mas outro identificador de sala.
             let mut invite = host.invite().clone();
             invite.room_id = RoomId::random();
 
-            let (guest_tx, _guest_rx) = mpsc::unbounded_channel();
-            let result = timeout(
-                LIMITE,
-                Guest::connect(NetMode::LocalOnly, &invite, guest_tx),
-            )
-            .await
-            .expect("recusa demorou demais");
-            assert!(result.is_err());
-
+            assert!(entrar(&invite, SENHA).await.is_err());
             // O Host não deve ter anunciado ninguém.
+            assert!(host_rx.try_recv().is_err());
+            host.stop().await;
+        }
+
+        #[tokio::test]
+        async fn senha_errada_e_recusada() {
+            let (host, mut host_rx) = abrir_sala().await;
+            let invite = host.invite().clone();
+
+            let erro = entrar(&invite, "senha-errada").await.err().unwrap();
+            // Mensagem genérica: não diz que foi a senha.
+            assert!(!erro.to_string().to_lowercase().contains("incorreta"));
+            assert_eq!(proximo_evento(&mut host_rx).await, NetEvent::JoinRefused);
+
+            // E quem sabe a senha continua entrando normalmente.
+            let guest = entrar(&invite, SENHA).await.unwrap();
+            assert!(matches!(
+                proximo_evento(&mut host_rx).await,
+                NetEvent::GuestConnected { .. }
+            ));
+            guest.leave().await;
+            host.stop().await;
+        }
+
+        #[tokio::test]
+        async fn muitas_falhas_bloqueiam_ate_a_senha_certa() {
+            let (host, mut host_rx) = abrir_sala().await;
+            let invite = host.invite().clone();
+
+            // Falhas livres + 1: a última já ativa o bloqueio (2 s).
+            for _ in 0..=FREE_FAILURES {
+                assert!(entrar(&invite, "chute-errado").await.is_err());
+                assert_eq!(proximo_evento(&mut host_rx).await, NetEvent::JoinRefused);
+            }
+            // Mais duas rodadas para o bloqueio crescer: 4 s e depois 8 s.
+            for espera in [2, 4] {
+                tokio::time::sleep(Duration::from_secs(espera) + Duration::from_millis(300)).await;
+                assert!(entrar(&invite, "chute-errado").await.is_err());
+                assert_eq!(proximo_evento(&mut host_rx).await, NetEvent::JoinRefused);
+            }
+
+            // Bloqueado por 8 s: nem a senha certa entra agora.
+            assert!(entrar(&invite, SENHA).await.is_err());
+            // Recusa por bloqueio não gera evento (evita inundar o registro).
             assert!(host_rx.try_recv().is_err());
             host.stop().await;
         }

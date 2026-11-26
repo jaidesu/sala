@@ -58,7 +58,8 @@ export default function HostTest({ invite, guests, log, onStop }: HostTestProps)
             {copied ? "Copiado!" : "Copiar convite"}
           </button>
           <p className="text-xs text-zinc-500">
-            Mantenha o app aberto e o computador ligado enquanto a sala existir.
+            Envie a <strong>senha por outro canal</strong> (ligação, outro app), nunca junto
+            com o convite. Mantenha o app aberto e o computador ligado.
           </p>
         </div>
       </section>

@@ -9,8 +9,8 @@ import {
   onNetEvent,
   runningInTauri,
   type NetMode,
-  type PathKind,
 } from "./lib/tauri";
+import CreateRoom from "./screens/CreateRoom";
 import GuestTest from "./screens/GuestTest";
 import Home from "./screens/Home";
 import HostTest from "./screens/HostTest";
@@ -18,12 +18,9 @@ import HostTest from "./screens/HostTest";
 /** Qual tela está aberta. */
 type Screen =
   | { kind: "home" }
+  | { kind: "create"; mode: NetMode }
   | { kind: "host"; invite: string }
   | { kind: "guest"; mode: NetMode };
-
-function pathToState(path: PathKind): ConnectionState {
-  return path;
-}
 
 function timestamp() {
   return new Date().toLocaleTimeString();
@@ -61,8 +58,11 @@ export default function App() {
           setGuests((g) => g.filter((x) => x !== event.guest));
           setLog((l) => [`${timestamp()} · ${event.guest} saiu`, ...l]);
           break;
+        case "joinRefused":
+          setLog((l) => [`${timestamp()} · tentativa de entrada recusada`, ...l]);
+          break;
         case "pathChanged":
-          setConnection(pathToState(event.path));
+          setConnection(event.path);
           break;
         case "disconnected":
           setConnection("disconnected");
@@ -80,11 +80,17 @@ export default function App() {
     };
   }, []);
 
-  async function createRoom(mode: NetMode) {
+  function goHome() {
+    setError(null);
+    setScreen({ kind: "home" });
+  }
+
+  async function createRoom(password: string) {
+    if (screen.kind !== "create") return;
     setBusy(true);
     setError(null);
     try {
-      const invite = await hostStart(mode);
+      const invite = await hostStart(screen.mode, password);
       setGuests([]);
       setLog([`${timestamp()} · sala aberta`]);
       setScreen({ kind: "host", invite });
@@ -97,16 +103,16 @@ export default function App() {
 
   async function stopRoom() {
     await hostStop().catch(() => {});
-    setScreen({ kind: "home" });
+    goHome();
   }
 
-  async function joinRoom(invite: string) {
+  async function joinRoom(invite: string, password: string) {
     if (screen.kind !== "guest") return;
     setError(null);
     setConnection("connecting");
     try {
-      const path = await guestJoin(invite, screen.mode);
-      setConnection(pathToState(path));
+      const path = await guestJoin(invite, password, screen.mode);
+      setConnection(path);
     } catch (err) {
       setConnection(null);
       setError(errorMessage(err));
@@ -116,23 +122,27 @@ export default function App() {
   async function leaveRoom() {
     await guestLeave().catch(() => {});
     setConnection(null);
-    setError(null);
-    setScreen({ kind: "home" });
+    goHome();
   }
 
   switch (screen.kind) {
     case "home":
       return (
         <Home
-          error={error}
-          busy={busy}
-          onCreate={createRoom}
+          onCreate={(mode) => {
+            setError(null);
+            setScreen({ kind: "create", mode });
+          }}
           onJoin={(mode) => {
             setError(null);
             setConnection(null);
             setScreen({ kind: "guest", mode });
           }}
         />
+      );
+    case "create":
+      return (
+        <CreateRoom busy={busy} error={error} onCreate={createRoom} onBack={goHome} />
       );
     case "host":
       return (

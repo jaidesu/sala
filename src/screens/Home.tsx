@@ -7,10 +7,6 @@ import {
 } from "../lib/tauri";
 
 interface HomeProps {
-  /** Mensagem de erro da última tentativa (ex.: sem internet). */
-  error: string | null;
-  /** `true` enquanto a sala está sendo aberta. */
-  busy: boolean;
   onCreate: (mode: NetMode) => void;
   onJoin: (mode: NetMode) => void;
 }
@@ -21,11 +17,11 @@ interface HomeProps {
  * A opção "só rede local" desliga relays e descoberta pela internet. Serve
  * para testar em dois computadores na mesma rede, mesmo sem internet.
  */
-export default function Home({ error, busy, onCreate, onJoin }: HomeProps) {
+export default function Home({ onCreate, onJoin }: HomeProps) {
   const [info, setInfo] = useState<AppInfo | null>(null);
   const [localOnly, setLocalOnly] = useState(false);
   const mode: NetMode = localOnly ? "localOnly" : "internet";
-  const disabled = !runningInTauri || busy;
+  const disabled = !runningInTauri;
 
   useEffect(() => {
     getAppInfo()
@@ -49,7 +45,7 @@ export default function Home({ error, busy, onCreate, onJoin }: HomeProps) {
           onClick={() => onCreate(mode)}
           className="rounded-lg bg-emerald-600 px-4 py-3 font-medium text-white hover:bg-emerald-500 disabled:cursor-not-allowed disabled:opacity-50"
         >
-          {busy ? "Abrindo sala…" : "Criar sala"}
+          Criar sala
         </button>
         <button
           type="button"
@@ -69,12 +65,6 @@ export default function Home({ error, busy, onCreate, onJoin }: HomeProps) {
           />
           Só rede local (sem relay)
         </label>
-
-        {error && (
-          <p role="alert" className="rounded-md bg-red-950 px-3 py-2 text-sm text-red-300">
-            {error}
-          </p>
-        )}
       </div>
 
       <footer className="text-xs text-zinc-500">

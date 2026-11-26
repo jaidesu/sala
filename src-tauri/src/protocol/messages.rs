@@ -1,8 +1,8 @@
 //! Mensagens do protocolo.
 //!
-//! Na fase 2 só existem as mensagens do teste de conexão (`Hello`, `Ping`,
-//! `Pong`). As mensagens de chat (`ChatMessage`, `Joined`, `Kick`...) chegam
-//! na fase 4, e o handshake de senha (`PakeMsg`) na fase 3.
+//! Existem as mensagens de abertura (`Hello`), do handshake de senha
+//! (`PakeMsg`, `PakeConfirm`) e do teste de conexão (`Ping`, `Pong`). As
+//! mensagens de chat (`ChatMessage`, `Joined`, `Kick`...) chegam na fase 4.
 //!
 //! O atributo `#[serde(tag = "type")]` faz cada mensagem virar um JSON com o
 //! campo `type` dizendo qual é, por exemplo: `{"type":"ping","seq":3}`.
@@ -21,6 +21,10 @@ pub enum Message {
     /// versão do protocolo fala. O Host confere as duas coisas e responde com
     /// o próprio `Hello`, ou fecha a conexão.
     Hello { version: u16, room_id: RoomId },
+    /// Mensagem do SPAKE2 (33 bytes). Cada lado manda uma.
+    PakeMsg { bytes: Vec<u8> },
+    /// Prova (HMAC) de que o remetente chegou à mesma chave.
+    PakeConfirm { mac: Vec<u8> },
     /// Convidado → Host: "você está aí?". O `seq` identifica o ping.
     Ping { seq: u64 },
     /// Host → Convidado: resposta ao `Ping` de mesmo `seq`.

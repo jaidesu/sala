@@ -32,6 +32,7 @@ export interface PingResult {
 export type NetEvent =
   | { kind: "guestConnected"; guest: string }
   | { kind: "guestDisconnected"; guest: string }
+  | { kind: "joinRefused" }
   | { kind: "pathChanged"; path: PathKind }
   | { kind: "disconnected" };
 
@@ -48,9 +49,14 @@ export async function getAppInfo(): Promise<AppInfo | null> {
   return invoke<AppInfo>("app_info");
 }
 
-/** Abre uma sala e devolve o convite. */
-export function hostStart(mode: NetMode): Promise<string> {
-  return invoke<string>("host_start", { mode });
+/** Gera uma senha forte no núcleo Rust (gerador aleatório do sistema). */
+export function generatePassword(): Promise<string> {
+  return invoke<string>("generate_password");
+}
+
+/** Abre uma sala protegida por `password` e devolve o convite. */
+export function hostStart(mode: NetMode, password: string): Promise<string> {
+  return invoke<string>("host_start", { mode, password });
 }
 
 /** Fecha a sala. */
@@ -58,9 +64,13 @@ export function hostStop(): Promise<void> {
   return invoke("host_stop");
 }
 
-/** Entra na sala do convite. Devolve o caminho inicial. */
-export function guestJoin(invite: string, mode: NetMode): Promise<PathKind> {
-  return invoke<PathKind>("guest_join", { invite, mode });
+/** Entra na sala do convite usando a senha. Devolve o caminho inicial. */
+export function guestJoin(
+  invite: string,
+  password: string,
+  mode: NetMode,
+): Promise<PathKind> {
+  return invoke<PathKind>("guest_join", { invite, password, mode });
 }
 
 /** Mede a latência até o Host. */

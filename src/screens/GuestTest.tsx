@@ -6,7 +6,7 @@ interface GuestTestProps {
   /** Estado da conexão; `null` = ainda não tentou conectar. */
   connection: ConnectionState | null;
   error: string | null;
-  onConnect: (invite: string) => void;
+  onConnect: (invite: string, password: string) => void;
   onLeave: () => void;
 }
 
@@ -16,6 +16,7 @@ interface GuestTestProps {
  */
 export default function GuestTest({ connection, error, onConnect, onLeave }: GuestTestProps) {
   const [invite, setInvite] = useState("");
+  const [password, setPassword] = useState("");
   const [pings, setPings] = useState<PingResult[]>([]);
   const [pingError, setPingError] = useState<string | null>(null);
 
@@ -50,7 +51,9 @@ export default function GuestTest({ connection, error, onConnect, onLeave }: Gue
           className="flex flex-col gap-3"
           onSubmit={(e) => {
             e.preventDefault();
-            onConnect(invite);
+            onConnect(invite, password);
+            // Não guardamos a senha na tela depois de usá-la.
+            setPassword("");
           }}
         >
           <label className="text-sm font-medium text-zinc-400" htmlFor="invite">
@@ -64,10 +67,22 @@ export default function GuestTest({ connection, error, onConnect, onLeave }: Gue
             rows={4}
             className="w-full resize-none break-all rounded-lg border border-zinc-800 bg-zinc-900 p-3 font-mono text-xs"
           />
+          <label className="text-sm font-medium text-zinc-400" htmlFor="guest-password">
+            Senha
+          </label>
+          <input
+            id="guest-password"
+            type="password"
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+            autoComplete="off"
+            spellCheck={false}
+            className="rounded-lg border border-zinc-800 bg-zinc-900 px-3 py-2 font-mono text-sm"
+          />
           <div className="flex items-center gap-3">
             <button
               type="submit"
-              disabled={!invite.trim() || connection === "connecting"}
+              disabled={!invite.trim() || !password || connection === "connecting"}
               className="rounded-lg bg-emerald-600 px-4 py-2 text-sm font-medium text-white hover:bg-emerald-500 disabled:cursor-not-allowed disabled:opacity-50"
             >
               Conectar

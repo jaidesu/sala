@@ -83,7 +83,7 @@ jobs:
             - **Windows:** `Sala_x.y.z_x64-setup.exe` (recomendado) ou o `.msi`
             - **macOS com chip Apple (M1/M2/M3…):** `Sala_x.y.z_aarch64.dmg`
             - **macOS com Intel:** `Sala_x.y.z_x64.dmg`
-            - **Linux:** `.AppImage` (qualquer distribuição) ou `.deb` (Ubuntu/Debian)
+            - **Linux:** `.AppImage` (qualquer distribuição), `.deb` (Ubuntu/Debian) ou `.rpm` (Fedora)
 
             ## Aviso: app sem assinatura digital
             Os instaladores ainda não são assinados (isso exige certificados pagos):

@@ -6,6 +6,19 @@ Uma pessoa (o **Host**) cria uma sala no próprio computador; outras pessoas (**
 
 > A especificação completa está em [`SPEC.md`](SPEC.md).
 
+## Baixar
+
+Os instaladores ficam na página de [Releases](https://github.com/jaidesu/sala/releases):
+
+| Sistema | Arquivo |
+|---|---|
+| Windows | `Sala_x.y.z_x64-setup.exe` (recomendado) ou `.msi` |
+| macOS (chip Apple M1/M2/M3…) | `Sala_x.y.z_aarch64.dmg` |
+| macOS (Intel) | `Sala_x.y.z_x64.dmg` |
+| Linux | `.AppImage` (qualquer distribuição), `.deb` (Ubuntu/Debian) ou `.rpm` (Fedora) |
+
+Os instaladores têm de 3 a 5 MB (o `.AppImage` tem ~80 MB porque leva junto o WebView). Eles não são assinados digitalmente; veja [Avisos ao rodar apps sem assinatura](#avisos-ao-rodar-apps-sem-assinatura).
+
 ## Status
 
 | Fase | Descrição | Situação |
@@ -16,7 +29,7 @@ Uma pessoa (o **Host**) cria uma sala no próprio computador; outras pessoas (**
 | 4 | Sala e chat: protocolo, histórico, participantes | ✅ testado manualmente |
 | 5 | Interface completa | ✅ testado manualmente |
 | 6 | Robustez: reconexão, expulsão, encerramento | ✅ testado manualmente |
-| 7 | Instaladores e releases | ⏳ |
+| 7 | Instaladores e releases | ✅ builds dos 3 sistemas testados; falta a primeira versão |
 
 ## Stack
 
@@ -109,7 +122,26 @@ O computador de desenvolvimento não tem o compilador Rust; quem compila é o **
 |---|---|---|
 | `CI` | todo envio para `main` e pull requests | compila a interface; `cargo fmt`, `clippy` e `cargo test` no Linux |
 | `Build Windows` | todo envio para `main` ou manual | gera o instalador `.exe` e o executável portátil |
-| `Release` | ao enviar uma tag `v*` (ex.: `v0.1.0`) | gera instaladores para Windows, Linux e macOS num rascunho de Release |
+| `Release` | manual (teste) ou ao enviar uma tag `v*` | gera instaladores para Windows, Linux e macOS (Apple e Intel) |
+
+### Lançar uma versão
+
+1. Atualize a versão em **três lugares** (precisam ser iguais): `package.json`, `src-tauri/Cargo.toml` e `src-tauri/tauri.conf.json`.
+2. (Opcional) Teste os instaladores sem publicar: **Actions → Release → Run workflow**. Os arquivos ficam em "Artifacts" da execução.
+3. Crie e envie a tag:
+   ```bash
+   git tag v0.2.0
+   git push origin v0.2.0
+   ```
+4. O workflow cria um **rascunho** em [Releases](https://github.com/jaidesu/sala/releases) com os instaladores. Revise e clique em **Publish release** para torná-lo público.
+
+O ícone do app vem de `src-tauri/icons/source.svg`. Depois de editá-lo, gere os outros tamanhos com:
+
+```bash
+npx tauri icon src-tauri/icons/source.svg
+```
+
+(Apague as pastas `android/` e `ios/` que o comando cria: o app é só para desktop.)
 
 **Para baixar o `.exe`:** no GitHub, abra **Actions → Build Windows →** a execução mais recente → seção **Artifacts** → `sala-windows-portatil` (ou `-instalador`). Pelo terminal, dentro da pasta do projeto, troque `ID` pelo número da execução:
 

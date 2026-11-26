@@ -15,7 +15,7 @@ Uma pessoa (o **Host**) cria uma sala no próprio computador; outras pessoas (**
 | 3 | Senha: Argon2id + SPAKE2, limite de tentativas | ✅ testado manualmente |
 | 4 | Sala e chat: protocolo, histórico, participantes | ✅ testado manualmente |
 | 5 | Interface completa | ✅ testado manualmente |
-| 6 | Robustez: reconexão, expulsão, encerramento | ✅ falta teste manual |
+| 6 | Robustez: reconexão, expulsão, encerramento | ✅ testado manualmente |
 | 7 | Instaladores e releases | ⏳ |
 
 ## Stack

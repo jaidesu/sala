@@ -1,4 +1,4 @@
-//! Lado do Host: abre a sala e aceita Convidados.
+//! Lado do Host: abre a sala, aceita Convidados e retransmite as mensagens.
 //!
 //! Fluxo de cada conexão:
 //! 1. o Convidado abre um stream bidirecional e manda `Hello`;
@@ -6,11 +6,22 @@
 //!    tentativas. Se algo estiver errado, fecha a conexão sem explicar o
 //!    motivo (não dar pistas a quem está tentando invadir);
 //! 3. o Host responde `Hello` e os dois rodam o handshake de senha (`auth`);
-//! 4. com a senha confirmada, o Host passa a responder cada `Ping` com `Pong`.
+//! 4. o Convidado manda `Join` com o apelido; o Host responde `Joined`, a lista
+//!    de participantes e o histórico, e avisa os outros;
+//! 5. a partir daí, cada `SendMessage` vira um `Chat` retransmitido a todos.
+//!
+//! # Como as mensagens chegam a todos
+//!
+//! Cada Convidado tem uma **caixa de saída** (`outbox`): um canal com espaço
+//! para `OUTBOX_CAPACITY` mensagens, esvaziado por uma tarefa que escreve no
+//! stream dele. Retransmitir é só colocar a mensagem em todas as caixas, sem
+//! esperar a rede. Se a caixa de alguém enche (conexão lenta ou travada),
+//! essa pessoa é desconectada, para não atrasar nem pesar para os outros.
 
 use std::{
+    collections::HashMap,
     sync::{Arc, Mutex, MutexGuard},
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 use anyhow::{Result, anyhow, bail};
@@ -18,11 +29,15 @@ use iroh::{
     Endpoint,
     endpoint::{Connection, RecvStream, SendStream},
 };
-use tokio::{sync::mpsc::UnboundedSender, task::JoinHandle, time::timeout};
+use tokio::{
+    sync::mpsc::{self, UnboundedSender},
+    task::JoinHandle,
+    time::timeout,
+};
 use zeroize::Zeroizing;
 
 use super::{
-    HANDSHAKE_TIMEOUT, NetEvent, auth,
+    HANDSHAKE_TIMEOUT, NetEvent, RoomSnapshot, auth,
     endpoint::{self, NetMode},
 };
 use crate::{
@@ -32,13 +47,21 @@ use crate::{
         password,
     },
     protocol::{PROTOCOL_VERSION, messages::Message, recv_msg, send_msg},
-    room::invite::{Invite, RoomId},
+    room::{
+        invite::{Invite, RoomId},
+        state::{HOST_ID, ParticipantId, RoomError, RoomState, now_millis},
+    },
 };
 
 /// Código de fechamento usado quando o Host recusa uma conexão.
 const CLOSE_REFUSED: u32 = 1;
+/// Mensagens que podem ficar na fila de um Convidado antes de ele ser
+/// considerado lento demais.
+const OUTBOX_CAPACITY: usize = 256;
+/// Tempo para as últimas mensagens (ex.: `RoomClosed`) saírem antes de fechar.
+const CLOSE_GRACE: Duration = Duration::from_millis(300);
 
-/// O que todas as conexões precisam saber para autenticar Convidados.
+/// Dados fixos para autenticar Convidados.
 struct RoomAuth {
     room_id: RoomId,
     host_id: [u8; 32],
@@ -47,10 +70,59 @@ struct RoomAuth {
     limiter: Mutex<AttemptLimiter>,
 }
 
+/// Estado vivo da sala + caixas de saída de quem está conectado.
+struct Hub {
+    state: RoomState,
+    outboxes: HashMap<ParticipantId, mpsc::Sender<Message>>,
+    /// `true` depois de `stop()`: ninguém mais entra e não geramos eventos.
+    closed: bool,
+}
+
+impl Hub {
+    /// Coloca `msg` na caixa de saída de todos os Convidados conectados.
+    fn broadcast(&mut self, msg: &Message) {
+        let mut too_slow = Vec::new();
+        for (id, outbox) in &self.outboxes {
+            if outbox.try_send(msg.clone()).is_err() {
+                too_slow.push(*id);
+            }
+        }
+        // Tirar a caixa de saída encerra a tarefa que escreve para essa
+        // pessoa, o que fecha a conexão dela. A saída é tratada em `serve_guest`.
+        for id in too_slow {
+            self.outboxes.remove(&id);
+        }
+    }
+}
+
+/// Tudo o que as tarefas da sala compartilham.
+struct Shared {
+    auth: RoomAuth,
+    hub: Mutex<Hub>,
+    events: UnboundedSender<NetEvent>,
+}
+
+impl Shared {
+    fn hub(&self) -> MutexGuard<'_, Hub> {
+        // Se outra tarefa entrou em pânico segurando a trava, seguimos mesmo
+        // assim: o estado continua utilizável.
+        self.hub.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn limiter(&self) -> MutexGuard<'_, AttemptLimiter> {
+        self.auth.limiter.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn emit(&self, event: NetEvent) {
+        let _ = self.events.send(event);
+    }
+}
+
 /// Uma sala aberta.
 pub struct Host {
     endpoint: Endpoint,
     invite: Invite,
+    shared: Arc<Shared>,
     accept_task: JoinHandle<()>,
 }
 
@@ -60,9 +132,11 @@ impl Host {
     pub async fn start(
         mode: NetMode,
         password: Zeroizing<String>,
+        nickname: &str,
         events: UnboundedSender<NetEvent>,
     ) -> Result<Self> {
         password::validate_new(&password)?;
+        let state = RoomState::new(nickname, Instant::now())?;
         let room_id = RoomId::random();
 
         // O Argon2id leva ~1 s de CPU: roda numa thread separada para não
@@ -85,18 +159,27 @@ impl Host {
             room_id,
             host: host_addr,
         };
-        let room = Arc::new(RoomAuth {
-            room_id,
-            host_id: *endpoint.id().as_bytes(),
-            stretched,
-            limiter: Mutex::new(AttemptLimiter::default()),
+        let shared = Arc::new(Shared {
+            auth: RoomAuth {
+                room_id,
+                host_id: *endpoint.id().as_bytes(),
+                stretched,
+                limiter: Mutex::new(AttemptLimiter::default()),
+            },
+            hub: Mutex::new(Hub {
+                state,
+                outboxes: HashMap::new(),
+                closed: false,
+            }),
+            events,
         });
 
-        let accept_task = tokio::spawn(accept_loop(endpoint.clone(), room, events));
+        let accept_task = tokio::spawn(accept_loop(endpoint.clone(), shared.clone()));
 
         Ok(Self {
             endpoint,
             invite,
+            shared,
             accept_task,
         })
     }
@@ -105,8 +188,49 @@ impl Host {
         &self.invite
     }
 
-    /// Fecha a sala e todas as conexões.
+    /// Foto atual da sala, do ponto de vista do Host.
+    pub fn snapshot(&self) -> RoomSnapshot {
+        let hub = self.shared.hub();
+        let participants = hub.state.participants();
+        let me = participants
+            .iter()
+            .find(|p| p.id == HOST_ID)
+            .cloned()
+            .expect("o Host sempre está na sala");
+        RoomSnapshot {
+            me,
+            participants,
+            history: hub.state.history(),
+        }
+    }
+
+    /// O Host manda uma mensagem na sala.
+    pub fn send(&self, text: &str) -> Result<(), RoomError> {
+        let message = {
+            let mut hub = self.shared.hub();
+            let message = hub
+                .state
+                .post(HOST_ID, text, Instant::now(), now_millis())?;
+            hub.broadcast(&Message::Chat {
+                message: message.clone(),
+            });
+            message
+        };
+        self.shared.emit(NetEvent::Chat { message });
+        Ok(())
+    }
+
+    /// Encerra a sala: avisa todos, espera um pouco e fecha as conexões.
     pub async fn stop(self) {
+        {
+            let mut hub = self.shared.hub();
+            hub.closed = true;
+            hub.broadcast(&Message::RoomClosed);
+            // Soltar as caixas de saída faz cada tarefa de escrita enviar o
+            // que restou e encerrar o stream.
+            hub.outboxes.clear();
+        }
+        tokio::time::sleep(CLOSE_GRACE).await;
         // `close` avisa os Convidados e faz o `accept()` devolver `None`,
         // o que encerra o `accept_loop`.
         self.endpoint.close().await;
@@ -115,16 +239,15 @@ impl Host {
 }
 
 /// Aceita conexões para sempre (até o endpoint fechar).
-async fn accept_loop(endpoint: Endpoint, room: Arc<RoomAuth>, events: UnboundedSender<NetEvent>) {
+async fn accept_loop(endpoint: Endpoint, shared: Arc<Shared>) {
     while let Some(incoming) = endpoint.accept().await {
-        let events = events.clone();
-        let room = room.clone();
+        let shared = shared.clone();
         // Cada Convidado é atendido numa tarefa separada, para um não travar o outro.
         tokio::spawn(async move {
             let Ok(conn) = incoming.await else {
                 return; // handshake QUIC falhou: nada a fazer
             };
-            serve_guest(conn, room, events).await;
+            serve_guest(conn, shared).await;
         });
     }
 }
@@ -141,57 +264,167 @@ enum Refusal {
 }
 
 /// Atende um Convidado do começo ao fim.
-async fn serve_guest(conn: Connection, room: Arc<RoomAuth>, events: UnboundedSender<NetEvent>) {
-    // Identificador curto (só para exibir). É derivado da chave pública do
-    // Convidado; não é segredo.
-    let guest = conn.remote_id().fmt_short().to_string();
-
-    let (mut send, mut recv) = match admit(&conn, &room).await {
+async fn serve_guest(conn: Connection, shared: Arc<Shared>) {
+    // 1-3. Hello, limitador e senha.
+    let (mut send, mut recv) = match admit(&conn, &shared.auth).await {
         Ok(streams) => streams,
         Err(refusal) => {
             if refusal == Refusal::Auth {
-                let _ = events.send(NetEvent::JoinRefused);
+                shared.emit(NetEvent::JoinRefused);
             }
             conn.close(CLOSE_REFUSED.into(), b"");
             return;
         }
     };
 
-    let _ = events.send(NetEvent::GuestConnected {
-        guest: guest.clone(),
+    // 4. Join: o Convidado diz o apelido.
+    let nickname = match timeout(HANDSHAKE_TIMEOUT, recv_msg::<_, Message>(&mut recv)).await {
+        Ok(Ok(Message::Join { nickname })) => nickname,
+        _ => {
+            conn.close(CLOSE_REFUSED.into(), b"");
+            return;
+        }
+    };
+
+    let (outbox, mut outbox_rx) = mpsc::channel(OUTBOX_CAPACITY);
+    let joined = {
+        let mut hub = shared.hub();
+        if hub.closed {
+            Err(anyhow!("sala encerrada"))
+        } else {
+            match hub.state.join(&nickname, Instant::now()) {
+                Ok(me) => {
+                    let participants = hub.state.participants();
+                    let history = hub.state.history();
+                    hub.broadcast(&Message::ParticipantJoined {
+                        participant: me.clone(),
+                    });
+                    // A caixa entra na mesma "trava" em que tiramos a foto
+                    // da sala: nada que aconteça depois se perde.
+                    hub.outboxes.insert(me.id, outbox);
+                    Ok((me, participants, history))
+                }
+                Err(e) => Err(anyhow!(e)),
+            }
+        }
+    };
+    let (me, participants, history) = match joined {
+        Ok(j) => j,
+        Err(e) => {
+            refuse_politely(&conn, &mut send, e.to_string()).await;
+            return;
+        }
+    };
+    shared.emit(NetEvent::ParticipantJoined {
+        participant: me.clone(),
     });
 
-    // Responde pings até o Convidado sair. Qualquer erro aqui significa que a
-    // conexão acabou (saída normal, queda de rede ou mensagem inválida).
-    while let Ok(Message::Ping { seq }) = recv_msg::<_, Message>(&mut recv).await {
-        if send_msg(&mut send, &Message::Pong { seq }).await.is_err() {
-            break;
+    // Foto inicial direto no stream; o que acontecer enquanto isso espera na caixa.
+    let initial = async {
+        send_msg(
+            &mut send,
+            &Message::Joined {
+                you: me.clone(),
+                participants,
+                history_count: history.len() as u32,
+            },
+        )
+        .await?;
+        for message in history {
+            send_msg(&mut send, &Message::Chat { message }).await?;
         }
+        anyhow::Ok(())
+    };
+
+    if initial.await.is_ok() {
+        // Tarefa de escrita: esvazia a caixa de saída no stream.
+        let writer = tokio::spawn(async move {
+            while let Some(msg) = outbox_rx.recv().await {
+                if send_msg(&mut send, &msg).await.is_err() {
+                    break;
+                }
+            }
+            // Caixa fechada (sala encerrada ou Convidado lento): encerra o stream.
+            let _ = send.finish();
+        });
+
+        // 5. Leitura: cada `SendMessage` vira um `Chat` para todos.
+        while let Ok(Message::SendMessage { text }) = recv_msg::<_, Message>(&mut recv).await {
+            handle_send(&shared, me.id, &text);
+        }
+        writer.abort();
     }
 
+    // Saída (normal, queda ou erro): tira da sala e avisa os outros.
+    let left = {
+        let mut hub = shared.hub();
+        hub.outboxes.remove(&me.id);
+        let left = hub.state.leave(me.id);
+        if let Some(p) = &left
+            && !hub.closed
+        {
+            hub.broadcast(&Message::ParticipantLeft {
+                participant: p.clone(),
+            });
+        }
+        left.filter(|_| !hub.closed)
+    };
+    if let Some(participant) = left {
+        shared.emit(NetEvent::ParticipantLeft { participant });
+    }
     conn.close(0u32.into(), b"");
-    let _ = events.send(NetEvent::GuestDisconnected { guest });
+}
+
+/// Publica uma mensagem de um Convidado, ou avisa só a ele por que não deu.
+fn handle_send(shared: &Shared, from: ParticipantId, text: &str) {
+    let mut hub = shared.hub();
+    let result = hub.state.post(from, text, Instant::now(), now_millis());
+    match result {
+        Ok(message) => {
+            hub.broadcast(&Message::Chat {
+                message: message.clone(),
+            });
+            drop(hub);
+            shared.emit(NetEvent::Chat { message });
+        }
+        Err(e) => {
+            if let Some(outbox) = hub.outboxes.get(&from) {
+                let _ = outbox.try_send(Message::Rejected {
+                    reason: e.to_string(),
+                });
+            }
+        }
+    }
+}
+
+/// Explica a recusa ao Convidado (ex.: sala cheia) antes de fechar.
+async fn refuse_politely(conn: &Connection, send: &mut SendStream, reason: String) {
+    let _ = send_msg(send, &Message::Rejected { reason }).await;
+    let _ = send.finish();
+    // Dá um tempo para a mensagem chegar; o Convidado fecha ao lê-la.
+    let _ = timeout(Duration::from_secs(2), conn.closed()).await;
+    conn.close(CLOSE_REFUSED.into(), b"");
 }
 
 /// Decide se o Convidado entra. Devolve os streams prontos para uso.
-async fn admit(conn: &Connection, room: &RoomAuth) -> Result<(SendStream, RecvStream), Refusal> {
-    let (mut send, mut recv) = receive_hello(conn, room.room_id)
+async fn admit(conn: &Connection, auth: &RoomAuth) -> Result<(SendStream, RecvStream), Refusal> {
+    let (mut send, mut recv) = receive_hello(conn, auth.room_id)
         .await
         .map_err(|_| Refusal::Protocol)?;
 
-    lock(&room.limiter)
+    lock_limiter(auth)
         .begin(Instant::now())
         .map_err(|_| Refusal::Limited)?;
 
     // A partir daqui, qualquer saída precisa avisar o limitador.
     let result = timeout(
         HANDSHAKE_TIMEOUT,
-        authenticate(conn, room, &mut send, &mut recv),
+        authenticate(conn, auth, &mut send, &mut recv),
     )
     .await;
     let ok = matches!(result, Ok(Ok(())));
 
-    let mut limiter = lock(&room.limiter);
+    let mut limiter = lock_limiter(auth);
     if ok {
         limiter.end_success();
         Ok((send, recv))
@@ -199,6 +432,10 @@ async fn admit(conn: &Connection, room: &RoomAuth) -> Result<(SendStream, RecvSt
         limiter.end_failure(Instant::now());
         Err(Refusal::Auth)
     }
+}
+
+fn lock_limiter(auth: &RoomAuth) -> MutexGuard<'_, AttemptLimiter> {
+    auth.limiter.lock().unwrap_or_else(|e| e.into_inner())
 }
 
 /// Recebe e confere o `Hello` do Convidado.
@@ -224,7 +461,7 @@ async fn receive_hello(conn: &Connection, room_id: RoomId) -> Result<(SendStream
 /// Responde o `Hello` e roda o handshake de senha como Host.
 async fn authenticate(
     conn: &Connection,
-    room: &RoomAuth,
+    auth: &RoomAuth,
     send: &mut SendStream,
     recv: &mut RecvStream,
 ) -> Result<()> {
@@ -232,18 +469,12 @@ async fn authenticate(
         send,
         &Message::Hello {
             version: PROTOCOL_VERSION,
-            room_id: room.room_id,
+            room_id: auth.room_id,
         },
     )
     .await?;
 
     let guest_id = *conn.remote_id().as_bytes();
-    let ctx = auth::context(conn, room.room_id, room.host_id, guest_id)?;
-    auth::run(send, recv, &room.stretched, &ctx, Role::Host).await
-}
-
-/// Trava o limitador. Se outra tarefa entrou em pânico segurando a trava,
-/// seguimos com o valor mesmo assim (o limitador continua consistente).
-fn lock(limiter: &Mutex<AttemptLimiter>) -> MutexGuard<'_, AttemptLimiter> {
-    limiter.lock().unwrap_or_else(|e| e.into_inner())
+    let ctx = auth::context(conn, auth.room_id, auth.host_id, guest_id)?;
+    auth::run(send, recv, &auth.stretched, &ctx, Role::Host).await
 }

@@ -4,7 +4,7 @@
  * Regra do projeto: nenhum componente chama `invoke`/`listen` diretamente.
  * Tudo passa por aqui, para que os nomes dos comandos e os tipos fiquem num
  * lugar só. Os tipos abaixo precisam bater com os do Rust
- * (src-tauri/src/commands.rs e src-tauri/src/net/).
+ * (src-tauri/src/commands.rs, src-tauri/src/net/ e src-tauri/src/room/state.rs).
  */
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
@@ -22,18 +22,51 @@ export type NetMode = "internet" | "localOnly";
 /** `PathKind` do Rust: por onde os dados estão passando. */
 export type PathKind = "direct" | "relay" | "unknown";
 
-/** `PingResult` do Rust. */
-export interface PingResult {
-  rttMs: number;
+/** Mesmos limites de `room/state.rs`. */
+export const MAX_NICKNAME_CHARS = 32;
+export const MAX_MESSAGE_CHARS = 4000;
+
+export interface Participant {
+  id: number;
+  nickname: string;
+  isHost: boolean;
+}
+
+export interface ChatMessage {
+  id: number;
+  from: number;
+  nickname: string;
+  text: string;
+  /** Horário do Host em milissegundos desde 1970. */
+  timestamp: number;
+}
+
+/** Foto da sala ao criar/entrar. */
+export interface RoomSnapshot {
+  me: Participant;
+  participants: Participant[];
+  history: ChatMessage[];
+}
+
+export interface HostStarted {
+  invite: string;
+  room: RoomSnapshot;
+}
+
+export interface GuestJoined {
   path: PathKind;
+  room: RoomSnapshot;
 }
 
 /** `NetEvent` do Rust (o campo `kind` diz qual é). */
 export type NetEvent =
-  | { kind: "guestConnected"; guest: string }
-  | { kind: "guestDisconnected"; guest: string }
+  | { kind: "participantJoined"; participant: Participant }
+  | { kind: "participantLeft"; participant: Participant }
+  | { kind: "chat"; message: ChatMessage }
+  | { kind: "rejected"; reason: string }
   | { kind: "joinRefused" }
   | { kind: "pathChanged"; path: PathKind }
+  | { kind: "roomClosed" }
   | { kind: "disconnected" };
 
 /**
@@ -54,33 +87,38 @@ export function generatePassword(): Promise<string> {
   return invoke<string>("generate_password");
 }
 
-/** Abre uma sala protegida por `password` e devolve o convite. */
-export function hostStart(mode: NetMode, password: string): Promise<string> {
-  return invoke<string>("host_start", { mode, password });
+/** Abre uma sala protegida por `password`, com o Host usando `nickname`. */
+export function hostStart(
+  mode: NetMode,
+  password: string,
+  nickname: string,
+): Promise<HostStarted> {
+  return invoke<HostStarted>("host_start", { mode, password, nickname });
 }
 
-/** Fecha a sala. */
+/** Encerra a sala. */
 export function hostStop(): Promise<void> {
   return invoke("host_stop");
 }
 
-/** Entra na sala do convite usando a senha. Devolve o caminho inicial. */
+/** Entra na sala do convite. */
 export function guestJoin(
   invite: string,
   password: string,
+  nickname: string,
   mode: NetMode,
-): Promise<PathKind> {
-  return invoke<PathKind>("guest_join", { invite, password, mode });
-}
-
-/** Mede a latência até o Host. */
-export function guestPing(): Promise<PingResult> {
-  return invoke<PingResult>("guest_ping");
+): Promise<GuestJoined> {
+  return invoke<GuestJoined>("guest_join", { invite, password, nickname, mode });
 }
 
 /** Sai da sala. */
 export function guestLeave(): Promise<void> {
   return invoke("guest_leave");
+}
+
+/** Envia uma mensagem na sala atual (Host ou Convidado). */
+export function sendMessage(text: string): Promise<void> {
+  return invoke("send_message", { text });
 }
 
 /** Escuta os eventos de rede. Devolve a função que para de escutar. */

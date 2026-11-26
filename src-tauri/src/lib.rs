@@ -8,7 +8,7 @@
 //! - `commands` — funções expostas à interface.
 //! - `protocol` — formato das mensagens trocadas entre Host e Convidados.
 //! - `net`      — endpoint iroh, lado Host e lado Convidado.
-//! - `room`     — convite (e, na fase 4, participantes e histórico).
+//! - `room`     — convite, participantes, histórico e regras da sala.
 //! - `crypto`   — Argon2id + SPAKE2, limite de tentativas, geração de senha.
 
 mod commands;
@@ -30,8 +30,8 @@ pub fn run() {
             commands::host_start,
             commands::host_stop,
             commands::guest_join,
-            commands::guest_ping,
             commands::guest_leave,
+            commands::send_message,
         ])
         .run(tauri::generate_context!())
         .expect("falha ao iniciar o aplicativo Tauri");

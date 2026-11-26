@@ -1,12 +1,12 @@
 import { useState } from "react";
 import PasswordMeter from "../components/PasswordMeter";
 import { MIN_PASSWORD_CHARS, strength } from "../lib/password";
-import { errorMessage, generatePassword } from "../lib/tauri";
+import { errorMessage, generatePassword, MAX_NICKNAME_CHARS } from "../lib/tauri";
 
 interface CreateRoomProps {
   busy: boolean;
   error: string | null;
-  onCreate: (password: string) => void;
+  onCreate: (password: string, nickname: string) => void;
   onBack: () => void;
 }
 
@@ -15,12 +15,25 @@ interface CreateRoomProps {
  * A senha não vai no convite: o Host combina com os Convidados por outro canal.
  */
 export default function CreateRoom({ busy, error, onCreate, onBack }: CreateRoomProps) {
+  const [nickname, setNickname] = useState("");
   const [password, setPassword] = useState("");
   const [visible, setVisible] = useState(false);
+  const [copied, setCopied] = useState(false);
   const [genError, setGenError] = useState<string | null>(null);
 
   const level = strength(password);
   const tooShort = Array.from(password).length < MIN_PASSWORD_CHARS;
+  const ready = !tooShort && nickname.trim() !== "" && !busy;
+
+  async function copyPassword() {
+    try {
+      await navigator.clipboard.writeText(password);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch {
+      setCopied(false);
+    }
+  }
 
   async function generate() {
     setGenError(null);
@@ -45,9 +58,20 @@ export default function CreateRoom({ busy, error, onCreate, onBack }: CreateRoom
         className="flex flex-col gap-3"
         onSubmit={(e) => {
           e.preventDefault();
-          if (!tooShort && !busy) onCreate(password);
+          if (ready) onCreate(password, nickname);
         }}
       >
+        <label htmlFor="host-nickname" className="text-sm font-medium text-zinc-400">
+          Seu apelido
+        </label>
+        <input
+          id="host-nickname"
+          value={nickname}
+          onChange={(e) => setNickname(e.target.value)}
+          maxLength={MAX_NICKNAME_CHARS}
+          className="rounded-lg border border-zinc-800 bg-zinc-900 px-3 py-2 text-sm"
+        />
+
         <label htmlFor="password" className="text-sm font-medium text-zinc-400">
           Senha da sala
         </label>
@@ -72,13 +96,28 @@ export default function CreateRoom({ busy, error, onCreate, onBack }: CreateRoom
 
         <PasswordMeter password={password} />
 
-        <button
-          type="button"
-          onClick={generate}
-          className="self-start text-sm text-emerald-400 hover:underline"
-        >
-          Gerar senha forte
-        </button>
+        <div className="flex gap-4">
+          <button
+            type="button"
+            onClick={generate}
+            className="text-sm text-emerald-400 hover:underline"
+          >
+            Gerar senha forte
+          </button>
+          {password && (
+            <button
+              type="button"
+              onClick={copyPassword}
+              className="text-sm text-emerald-400 hover:underline"
+            >
+              {copied ? "Senha copiada!" : "Copiar senha"}
+            </button>
+          )}
+        </div>
+        <p className="text-xs text-zinc-500">
+          Guarde a senha agora: você vai passá-la aos convidados por um canal diferente
+          do convite.
+        </p>
         {genError && <p className="text-sm text-red-300">{genError}</p>}
 
         {level === "weak" && (
@@ -97,7 +136,7 @@ export default function CreateRoom({ busy, error, onCreate, onBack }: CreateRoom
         <div className="mt-2 flex gap-3">
           <button
             type="submit"
-            disabled={tooShort || busy}
+            disabled={!ready}
             className="flex-1 rounded-lg bg-emerald-600 px-4 py-3 font-medium text-white hover:bg-emerald-500 disabled:cursor-not-allowed disabled:opacity-50"
           >
             {busy ? "Preparando a sala…" : "Criar sala"}

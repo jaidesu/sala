@@ -18,7 +18,9 @@ use tokio::io::{AsyncRead, AsyncWrite};
 /// Vai na mensagem `Hello` do handshake. Se Host e Convidado tiverem versões
 /// incompatíveis, a conexão é recusada com uma mensagem clara, em vez de
 /// falhar de forma estranha no meio da conversa.
-pub const PROTOCOL_VERSION: u16 = 1;
+///
+/// Histórico: 1 = fase 2 (ping); 2 = fases 3 e 4 (senha e chat).
+pub const PROTOCOL_VERSION: u16 = 2;
 
 /// Serializa `msg` em JSON e envia como um quadro.
 pub async fn send_msg<W, T>(writer: &mut W, msg: &T) -> Result<()>

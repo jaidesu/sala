@@ -1,5 +1,5 @@
-import { useEffect, useState } from "react";
-import type { ConnectionState } from "./components/ConnectionBadge";
+import { useEffect, useRef, useState } from "react";
+import { applyEvent, fromSnapshot, type RoomView } from "./lib/room";
 import {
   errorMessage,
   guestJoin,
@@ -8,66 +8,47 @@ import {
   hostStop,
   onNetEvent,
   runningInTauri,
+  sendMessage,
+  type NetEvent,
   type NetMode,
 } from "./lib/tauri";
 import CreateRoom from "./screens/CreateRoom";
-import GuestTest from "./screens/GuestTest";
 import Home from "./screens/Home";
-import HostTest from "./screens/HostTest";
+import JoinRoom from "./screens/JoinRoom";
+import Room from "./screens/Room";
 
-/** Qual tela está aberta. */
+/** Qual tela está aberta (a sala em si fica em `room`). */
 type Screen =
   | { kind: "home" }
   | { kind: "create"; mode: NetMode }
-  | { kind: "host"; invite: string }
-  | { kind: "guest"; mode: NetMode };
-
-function timestamp() {
-  return new Date().toLocaleTimeString();
-}
+  | { kind: "join"; mode: NetMode }
+  | { kind: "room" };
 
 /**
- * Raiz da interface: controla qual tela aparece e guarda o estado vindo dos
- * eventos de rede do núcleo Rust.
+ * Raiz da interface: controla qual tela aparece e aplica os eventos de rede
+ * do núcleo Rust ao estado da sala.
  */
 export default function App() {
   const [screen, setScreen] = useState<Screen>({ kind: "home" });
+  const [room, setRoom] = useState<RoomView | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  // Estado do Host
-  const [guests, setGuests] = useState<string[]>([]);
-  const [log, setLog] = useState<string[]>([]);
+  // Eventos que chegam enquanto a sala está sendo criada/aberta (antes de
+  // termos a foto inicial) ficam guardados aqui e são aplicados em seguida.
+  const pending = useRef<NetEvent[] | null>(null);
 
-  // Estado do Convidado
-  const [connection, setConnection] = useState<ConnectionState | null>(null);
-
-  // Escuta os eventos de rede durante toda a vida do app.
   useEffect(() => {
     if (!runningInTauri) return;
     let unlisten: (() => void) | undefined;
     let cancelled = false;
 
     onNetEvent((event) => {
-      switch (event.kind) {
-        case "guestConnected":
-          setGuests((g) => [...g, event.guest]);
-          setLog((l) => [`${timestamp()} · ${event.guest} entrou`, ...l]);
-          break;
-        case "guestDisconnected":
-          setGuests((g) => g.filter((x) => x !== event.guest));
-          setLog((l) => [`${timestamp()} · ${event.guest} saiu`, ...l]);
-          break;
-        case "joinRefused":
-          setLog((l) => [`${timestamp()} · tentativa de entrada recusada`, ...l]);
-          break;
-        case "pathChanged":
-          setConnection(event.path);
-          break;
-        case "disconnected":
-          setConnection("disconnected");
-          break;
+      if (pending.current) {
+        pending.current.push(event);
+        return;
       }
+      setRoom((r) => (r ? applyEvent(r, event) : r));
     }).then((fn) => {
       // Se o componente já foi desmontado, para de escutar na hora.
       if (cancelled) fn();
@@ -80,48 +61,67 @@ export default function App() {
     };
   }, []);
 
+  /** Mostra a sala a partir da foto inicial + eventos que chegaram no meio. */
+  function enterRoom(view: RoomView) {
+    const queued = pending.current ?? [];
+    pending.current = null;
+    setRoom(queued.reduce(applyEvent, view));
+    setScreen({ kind: "room" });
+  }
+
   function goHome() {
     setError(null);
+    setRoom(null);
     setScreen({ kind: "home" });
   }
 
-  async function createRoom(password: string) {
+  async function createRoom(password: string, nickname: string) {
     if (screen.kind !== "create") return;
     setBusy(true);
     setError(null);
+    pending.current = [];
     try {
-      const invite = await hostStart(screen.mode, password);
-      setGuests([]);
-      setLog([`${timestamp()} · sala aberta`]);
-      setScreen({ kind: "host", invite });
+      const started = await hostStart(screen.mode, password, nickname);
+      enterRoom(fromSnapshot("host", started.room, { invite: started.invite }));
     } catch (err) {
+      pending.current = null;
       setError(errorMessage(err));
     } finally {
       setBusy(false);
     }
   }
 
-  async function stopRoom() {
-    await hostStop().catch(() => {});
-    goHome();
-  }
-
-  async function joinRoom(invite: string, password: string) {
-    if (screen.kind !== "guest") return;
+  async function joinRoom(invite: string, password: string, nickname: string) {
+    if (screen.kind !== "join") return;
+    setBusy(true);
     setError(null);
-    setConnection("connecting");
+    pending.current = [];
     try {
-      const path = await guestJoin(invite, password, screen.mode);
-      setConnection(path);
+      const joined = await guestJoin(invite, password, nickname, screen.mode);
+      enterRoom(fromSnapshot("guest", joined.room, { connection: joined.path }));
     } catch (err) {
-      setConnection(null);
+      pending.current = null;
       setError(errorMessage(err));
+    } finally {
+      setBusy(false);
     }
   }
 
-  async function leaveRoom() {
-    await guestLeave().catch(() => {});
-    setConnection(null);
+  async function send(text: string): Promise<boolean> {
+    try {
+      await sendMessage(text);
+      return true;
+    } catch (err) {
+      setRoom((r) =>
+        r ? applyEvent(r, { kind: "rejected", reason: errorMessage(err) }) : r,
+      );
+      return false;
+    }
+  }
+
+  async function exitRoom() {
+    if (room?.role === "host") await hostStop().catch(() => {});
+    else await guestLeave().catch(() => {});
     goHome();
   }
 
@@ -135,8 +135,7 @@ export default function App() {
           }}
           onJoin={(mode) => {
             setError(null);
-            setConnection(null);
-            setScreen({ kind: "guest", mode });
+            setScreen({ kind: "join", mode });
           }}
         />
       );
@@ -144,18 +143,9 @@ export default function App() {
       return (
         <CreateRoom busy={busy} error={error} onCreate={createRoom} onBack={goHome} />
       );
-    case "host":
-      return (
-        <HostTest invite={screen.invite} guests={guests} log={log} onStop={stopRoom} />
-      );
-    case "guest":
-      return (
-        <GuestTest
-          connection={connection}
-          error={error}
-          onConnect={joinRoom}
-          onLeave={leaveRoom}
-        />
-      );
+    case "join":
+      return <JoinRoom busy={busy} error={error} onJoin={joinRoom} onBack={goHome} />;
+    case "room":
+      return room ? <Room view={room} onSend={send} onExit={exitRoom} /> : null;
   }
 }

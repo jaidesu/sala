@@ -3,6 +3,7 @@ name = "sala"
 version = "0.1.0"
 description = "Chat P2P privado, sem servidor central"
 authors = ["Sala"]
+repository = "https://github.com/jaidesu/sala"
 edition = "2024"
 
 [lib]

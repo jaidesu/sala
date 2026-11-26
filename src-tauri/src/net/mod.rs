@@ -78,7 +78,10 @@ pub enum NetEvent {
     /// Alguém ficou offline ou voltou (campo `online`).
     ParticipantUpdated { participant: Participant },
     /// Alguém saiu. `kicked` = removido pelo Host.
-    ParticipantLeft { participant: Participant, kicked: bool },
+    ParticipantLeft {
+        participant: Participant,
+        kicked: bool,
+    },
     /// Mensagem oficial do chat (já numerada e carimbada pelo Host).
     Chat { message: ChatMessage },
     /// (Convidado) O Host recusou um envio (ex.: rápido demais).
@@ -315,7 +318,10 @@ mod tests {
 
             // Enquanto a Ana está fora, o Host manda uma mensagem.
             host.drop_connection(id_ana);
-            assert_eq!(proximo_evento(&mut ana.eventos).await, NetEvent::Reconnecting);
+            assert_eq!(
+                proximo_evento(&mut ana.eventos).await,
+                NetEvent::Reconnecting
+            );
             host.send("mensagem durante a queda").unwrap();
 
             // Ana volta sozinha, como a mesma pessoa, e recebe o que perdeu.
@@ -323,7 +329,11 @@ mod tests {
                 NetEvent::Resynced { room, .. } => {
                     assert_eq!(room.me.id, id_ana);
                     assert_eq!(room.me.nickname, "Ana");
-                    assert!(room.history.iter().any(|m| m.text == "mensagem durante a queda"));
+                    assert!(
+                        room.history
+                            .iter()
+                            .any(|m| m.text == "mensagem durante a queda")
+                    );
                 }
                 outro => panic!("esperava Resynced, veio {outro:?}"),
             }

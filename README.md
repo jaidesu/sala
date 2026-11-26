@@ -15,7 +15,7 @@ Uma pessoa (o **Host**) cria uma sala no próprio computador; outras pessoas (**
 | 3 | Senha: Argon2id + SPAKE2, limite de tentativas | ✅ testado manualmente |
 | 4 | Sala e chat: protocolo, histórico, participantes | ✅ testado manualmente |
 | 5 | Interface completa | ✅ testado manualmente |
-| 6 | Robustez: reconexão, expulsão, encerramento | ⏳ |
+| 6 | Robustez: reconexão, expulsão, encerramento | ✅ falta teste manual |
 | 7 | Instaladores e releases | ⏳ |
 
 ## Stack
@@ -70,7 +70,14 @@ src-tauri/            Núcleo (Rust)
    - Se ficar em "Via relay", também está certo: alguns tipos de NAT/CGNAT impedem a conexão direta. Os dados continuam cifrados.
    - O ping via relay costuma ser maior (dezenas a centenas de ms) que o direto.
 4. **Sem internet (opcional):** marque **"Só rede local (sem relay)"** nos dois lados, com os dois computadores na mesma rede Wi-Fi/cabo.
-5. **Casos de erro:** feche o app do Host sem encerrar a sala → o Convidado deve mostrar "A conexão com o Host caiu." Cole um convite cortado → deve aparecer uma mensagem de convite inválido.
+5. **Queda e reconexão:** com um Convidado na sala, desligue o Wi-Fi dele por uns 10 segundos e ligue de novo.
+   - O Convidado vê o selo **"Reconectando…"** e depois **"Reconectado."**, sem precisar colar convite nem senha.
+   - Os outros veem "Fulano perdeu a conexão." (bolinha cinza, "offline") e depois "Fulano voltou.".
+   - Mensagens enviadas enquanto ele estava fora aparecem quando volta.
+   - Se ficar fora mais de 1 minuto, sai da sala; se a reconexão não der certo em 2 minutos, o Convidado vê uma mensagem explicando.
+6. **Expulsar:** no Host, passe o mouse sobre um Convidado na lista → **remover** → **confirmar**. Ele vê "Você foi removido(a) da sala pelo Host." e os outros veem a saída.
+7. **Fechar a janela:** feche o app do Host pelo X (sem clicar em Encerrar) → os Convidados veem "O Host encerrou a sala." (o app avisa antes de fechar). Feche um Convidado pelo X → os outros veem "… saiu." na hora.
+8. **Convite inválido:** cole um convite cortado → deve aparecer uma mensagem de convite inválido.
 
 ### Regras da sala
 
@@ -82,6 +89,11 @@ src-tauri/            Núcleo (Rust)
 | Histórico | últimas 1000 mensagens, só na memória do Host; somem ao encerrar |
 | Pessoas | até 50 por sala (contando o Host) |
 | Ordem | o Host numera e carimba o horário de cada mensagem; todos veem a mesma ordem |
+| Queda | quem cai fica "offline" por até 1 min e volta como a mesma pessoa (token de retomada) |
+| Reconexão | o app do Convidado tenta sozinho por até 2 min (espera de 1 s, 2 s, 4 s… até 15 s) |
+| Expulsar | o Host remove alguém; o token dessa pessoa deixa de valer |
+
+**Limitação de expulsar:** quem foi removido mas sabe a senha consegue entrar de novo como um participante novo (a identidade de rede muda a cada conexão). Para afastar alguém de vez, encerre a sala e abra outra com outra senha.
 
 > O Windows pode pedir permissão de rede no firewall na primeira vez; permita para redes privadas.
 

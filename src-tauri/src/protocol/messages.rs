@@ -61,7 +61,10 @@ pub enum Message {
     /// Host → todos: alguém ficou offline ou voltou (campo `online`).
     ParticipantUpdated { participant: Participant },
     /// Host → todos: alguém saiu. `kicked` = removido pelo Host.
-    ParticipantLeft { participant: Participant, kicked: bool },
+    ParticipantLeft {
+        participant: Participant,
+        kicked: bool,
+    },
     /// Convidado → Host: "estou saindo de propósito" (não esperar reconexão).
     Leave,
     /// Host → alvo: você foi removido da sala.

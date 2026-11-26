@@ -509,9 +509,7 @@ fn to_event(msg: Message) -> Option<NetEvent> {
     Some(match msg {
         Message::Chat { message } => NetEvent::Chat { message },
         Message::ParticipantJoined { participant } => NetEvent::ParticipantJoined { participant },
-        Message::ParticipantUpdated { participant } => {
-            NetEvent::ParticipantUpdated { participant }
-        }
+        Message::ParticipantUpdated { participant } => NetEvent::ParticipantUpdated { participant },
         Message::ParticipantLeft {
             participant,
             kicked,

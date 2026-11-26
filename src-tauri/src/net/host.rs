@@ -56,9 +56,7 @@ use crate::{
     protocol::{PROTOCOL_VERSION, messages::Message, recv_msg, send_msg},
     room::{
         invite::{Invite, RoomId},
-        state::{
-            Admission, HOST_ID, ParticipantId, RoomError, RoomState, SessionId, now_millis,
-        },
+        state::{Admission, HOST_ID, ParticipantId, RoomError, RoomState, SessionId, now_millis},
     },
 };
 

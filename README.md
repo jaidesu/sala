@@ -79,11 +79,13 @@ O computador de desenvolvimento não tem o compilador Rust; quem compila é o **
 | `Build Windows` | todo envio para `main` ou manual | gera o instalador `.exe` e o executável portátil |
 | `Release` | ao enviar uma tag `v*` (ex.: `v0.1.0`) | gera instaladores para Windows, Linux e macOS num rascunho de Release |
 
-**Para baixar o `.exe`:** no GitHub, abra **Actions → Build Windows →** a execução mais recente → seção **Artifacts** → `sala-windows-portatil` (ou `-instalador`). Pelo terminal:
+**Para baixar o `.exe`:** no GitHub, abra **Actions → Build Windows →** a execução mais recente → seção **Artifacts** → `sala-windows-portatil` (ou `-instalador`). Pelo terminal, dentro da pasta do projeto, troque `ID` pelo número da execução:
 
 ```bash
-gh run download --name sala-windows-portatil
+gh run download ID --name sala-windows-portatil --dir build-nuvem/ID
 ```
+
+Cada execução vai para a própria pasta em `build-nuvem/`, que o git ignora. Assim uma versão nova não esbarra no `sala.exe` de uma versão anterior (o `gh` não sobrescreve arquivos existentes).
 
 ### Só a interface, sem Rust
 

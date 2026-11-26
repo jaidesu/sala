@@ -29,7 +29,7 @@ Os instaladores têm de 3 a 5 MB (o `.AppImage` tem ~80 MB porque leva junto o W
 | 4 | Sala e chat: protocolo, histórico, participantes | ✅ testado manualmente |
 | 5 | Interface completa | ✅ testado manualmente |
 | 6 | Robustez: reconexão, expulsão, encerramento | ✅ testado manualmente |
-| 7 | Instaladores e releases | ✅ builds dos 3 sistemas testados; falta a primeira versão |
+| 7 | Instaladores e releases | ✅ v0.1.0 gerada (rascunho em Releases) |
 
 ## Stack
 

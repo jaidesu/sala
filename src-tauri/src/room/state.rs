@@ -362,7 +362,10 @@ mod tests {
         let (mut s, t) = sala();
         assert_eq!(s.post(HOST_ID, "  \n ", t, 0), Err(RoomError::EmptyMessage));
         let longa = "a".repeat(MAX_MESSAGE_CHARS + 1);
-        assert_eq!(s.post(HOST_ID, &longa, t, 0), Err(RoomError::MessageTooLong));
+        assert_eq!(
+            s.post(HOST_ID, &longa, t, 0),
+            Err(RoomError::MessageTooLong)
+        );
         assert_eq!(s.post(99, "oi", t, 0), Err(RoomError::UnknownParticipant));
         assert!(s.history().is_empty());
     }

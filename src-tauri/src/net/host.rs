@@ -8,7 +8,7 @@
 //! 3. o Host responde `Hello` e os dois rodam o handshake de senha (`auth`);
 //! 4. o Convidado manda `Join` com o apelido; o Host responde `Joined`, a lista
 //!    de participantes e o histórico, e avisa os outros;
-//! 5. a partir daí, cada `SendMessage` vira um `Chat` retransmitido a todos.
+//! 5. a partir daí, cada `Send` vira um `Chat` retransmitido a todos.
 //!
 //! # Como as mensagens chegam a todos
 //!
@@ -107,10 +107,6 @@ impl Shared {
         // Se outra tarefa entrou em pânico segurando a trava, seguimos mesmo
         // assim: o estado continua utilizável.
         self.hub.lock().unwrap_or_else(|e| e.into_inner())
-    }
-
-    fn limiter(&self) -> MutexGuard<'_, AttemptLimiter> {
-        self.auth.limiter.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     fn emit(&self, event: NetEvent) {
@@ -348,8 +344,8 @@ async fn serve_guest(conn: Connection, shared: Arc<Shared>) {
             let _ = send.finish();
         });
 
-        // 5. Leitura: cada `SendMessage` vira um `Chat` para todos.
-        while let Ok(Message::SendMessage { text }) = recv_msg::<_, Message>(&mut recv).await {
+        // 5. Leitura: cada `Send` vira um `Chat` para todos.
+        while let Ok(Message::Send { text }) = recv_msg::<_, Message>(&mut recv).await {
             handle_send(&shared, me.id, &text);
         }
         writer.abort();

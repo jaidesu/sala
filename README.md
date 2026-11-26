@@ -13,7 +13,7 @@ Uma pessoa (o **Host**) cria uma sala no próprio computador; outras pessoas (**
 | 1 | Setup: Tauri 2 + React/TS/Vite/Tailwind, CI para os 3 sistemas | ✅ |
 | 2 | Rede básica com iroh (Host ↔ Convidado, ping) | ✅ testado em redes diferentes |
 | 3 | Senha: Argon2id + SPAKE2, limite de tentativas | ✅ testado manualmente |
-| 4 | Sala e chat: protocolo, histórico, participantes | ⏳ |
+| 4 | Sala e chat: protocolo, histórico, participantes | ✅ falta teste manual |
 | 5 | Interface completa | ⏳ |
 | 6 | Robustez: reconexão, expulsão, encerramento | ⏳ |
 | 7 | Instaladores e releases | ⏳ |
@@ -32,36 +32,54 @@ Uma pessoa (o **Host**) cria uma sala no próprio computador; outras pessoas (**
 
 ```
 src/                  Interface (React)
-├── screens/          Telas (Home, CreateRoom, HostTest, GuestTest)
-├── components/       ConnectionBadge, PasswordMeter
+├── screens/          Telas (Home, CreateRoom, JoinRoom, Room)
+├── components/       MessageList, MessageInput, ParticipantList, ConnectionBadge, PasswordMeter
 ├── lib/tauri.ts      Única ponte com o núcleo Rust (invoke/listen tipados)
+├── lib/room.ts       Estado da sala na interface e como cada evento o altera
 ├── lib/password.ts   Estimativa de força da senha (medidor)
 src-tauri/            Núcleo (Rust)
 ├── src/lib.rs        Monta o app e registra os comandos
 ├── src/commands.rs   Comandos chamados pela interface
-├── src/protocol/     Mensagens (Hello, PakeMsg, PakeConfirm, Ping/Pong) e framing
-├── src/room/         Convite (endereço do Host + id da sala)
-├── src/net/          iroh: endpoint, Host, Convidado e handshake de senha (auth)
+├── src/protocol/     Mensagens (Hello, Pake*, Join, Chat...) e framing com limite de 64 KiB
+├── src/room/         Convite e estado da sala (participantes, histórico, regras)
+├── src/net/          iroh: endpoint, Host (retransmite), Convidado e handshake de senha
 ├── src/crypto/       Argon2id + SPAKE2, limite de tentativas, geração de senha
 ├── tauri.conf.json   Janela, CSP, empacotamento
 └── capabilities/     Permissões da WebView (mínimas)
 .github/workflows/    Compilação na nuvem (CI, build Windows, release)
 ```
 
-## Teste manual (fases 2 e 3)
+## Teste manual
 
-Ainda não há chat: só abrir a sala com senha, conectar e medir a latência ("ping").
+**Preparação:** baixe o `sala.exe` mais recente (veja "Para baixar o `.exe`" abaixo) nos computadores do teste.
 
-**Preparação:** baixe o `sala.exe` mais recente (veja "Para baixar o `.exe`" abaixo) nos dois computadores.
-
-1. **Mesmo computador (teste rápido):** abra o `sala.exe` duas vezes. Na primeira, **Criar sala** → **Gerar senha forte** (ou digite uma) → **Criar sala** → **Copiar convite**. Na segunda, **Entrar em uma sala** → cole o convite → digite a senha → **Conectar** → **Ping**. A janela do Host deve mostrar o Convidado em "Conectados". Criar e entrar levam ~1 s a mais que antes: é o Argon2id trabalhando.
-2. **Senha errada:** tente entrar com uma senha errada. O Convidado vê só "Não foi possível entrar na sala…" (sem dizer o motivo) e o Host vê "tentativa de entrada recusada" na Atividade. Depois de 5 erros, novas tentativas (até com a senha certa) são recusadas por alguns segundos, e a espera dobra a cada novo erro.
+1. **Mesmo computador (teste rápido):** abra o `sala.exe` três vezes.
+   - Janela 1: **Criar sala** → apelido → **Gerar senha forte** → **Copiar senha** (guarde) → **Criar sala** → **Copiar convite**.
+   - Janelas 2 e 3: **Entrar em uma sala** → convite, senha e apelido → **Entrar**.
+   - Converse: cada mensagem deve aparecer nas três janelas, na mesma ordem. Enter envia; Shift+Enter quebra a linha.
+   - Feche a janela 3 → as outras mostram "… saiu". Abra de novo e entre: ela recebe o histórico.
+   - Entre com o mesmo apelido de alguém → ele vira "Apelido (2)".
+   - Cole muitas mensagens seguidas bem rápido → aparece "Muitas mensagens seguidas. Espere um pouco."
+   - Tente mandar `<b>oi</b>` → deve aparecer literalmente, sem negrito (texto nunca vira HTML).
+   - Host: **Encerrar sala** (clique duas vezes para confirmar) → os Convidados veem "O Host encerrou a sala." e o campo de mensagem é desativado.
+2. **Senha errada:** tente entrar com uma senha errada. O Convidado vê só "Não foi possível entrar na sala…" (sem dizer o motivo) e o Host vê "Tentativa de entrada recusada." na conversa. Depois de 5 erros, novas tentativas (até com a senha certa) são recusadas por alguns segundos, e a espera dobra a cada novo erro.
 3. **Duas redes diferentes:** um computador na rede de casa e o outro no **4G do celular** (roteando a internet pelo celular). Repita os passos, mandando o convite por um app de mensagens e a senha por outro canal.
    - O selo deve mostrar **"Via relay"** no início e, em geral, mudar para **"Conexão direta"** em alguns segundos (hole punching).
    - Se ficar em "Via relay", também está certo: alguns tipos de NAT/CGNAT impedem a conexão direta. Os dados continuam cifrados.
    - O ping via relay costuma ser maior (dezenas a centenas de ms) que o direto.
 4. **Sem internet (opcional):** marque **"Só rede local (sem relay)"** nos dois lados, com os dois computadores na mesma rede Wi-Fi/cabo.
-5. **Casos de erro:** feche a sala no Host → o Convidado deve mostrar "Desconectado". Cole um convite cortado → deve aparecer uma mensagem de convite inválido.
+5. **Casos de erro:** feche o app do Host sem encerrar a sala → o Convidado deve mostrar "A conexão com o Host caiu." Cole um convite cortado → deve aparecer uma mensagem de convite inválido.
+
+### Regras da sala
+
+| Regra | Valor |
+|---|---|
+| Apelido | 1 a 32 caracteres; repetido ganha número ("Ana (2)") |
+| Mensagem | 1 a 4000 caracteres, exibida sempre como texto puro |
+| Ritmo | rajada de até 10 mensagens; depois, 2 por segundo (o Host não tem limite) |
+| Histórico | últimas 1000 mensagens, só na memória do Host; somem ao encerrar |
+| Pessoas | até 50 por sala (contando o Host) |
+| Ordem | o Host numera e carimba o horário de cada mensagem; todos veem a mesma ordem |
 
 > O Windows pode pedir permissão de rede no firewall na primeira vez; permita para redes privadas.
 

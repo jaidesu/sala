@@ -161,7 +161,7 @@ impl Guest {
         state::check_text(text)?;
         send_msg(
             &mut self.send,
-            &Message::SendMessage {
+            &Message::Send {
                 text: text.to_string(),
             },
         )
@@ -220,7 +220,9 @@ async fn read_loop(mut recv: RecvStream, events: UnboundedSender<NetEvent>) {
             Ok(Message::ParticipantJoined { participant }) => {
                 NetEvent::ParticipantJoined { participant }
             }
-            Ok(Message::ParticipantLeft { participant }) => NetEvent::ParticipantLeft { participant },
+            Ok(Message::ParticipantLeft { participant }) => {
+                NetEvent::ParticipantLeft { participant }
+            }
             Ok(Message::Rejected { reason }) => NetEvent::Rejected { reason },
             Ok(Message::RoomClosed) => {
                 let _ = events.send(NetEvent::RoomClosed);

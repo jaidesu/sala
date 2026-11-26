@@ -280,7 +280,10 @@ mod tests {
                     outro => panic!("evento inesperado: {outro:?}"),
                 }
             }
-            assert!(recusadas >= 1, "o limite de ritmo deveria ter recusado algo");
+            assert!(
+                recusadas >= 1,
+                "o limite de ritmo deveria ter recusado algo"
+            );
             assert!(aceitas >= 10, "a rajada inicial deveria passar");
             ana.leave().await;
             host.stop().await;

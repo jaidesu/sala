@@ -5,7 +5,7 @@
 //! 1. `Hello` (os dois lados) — versão e sala;
 //! 2. `PakeMsg` e `PakeConfirm` — handshake de senha (ver `net::auth`);
 //! 3. `Join` (Convidado) → `Joined` + N × `Chat` com o histórico (Host);
-//! 4. dali em diante: `SendMessage` (Convidado → Host) e `Chat`,
+//! 4. dali em diante: `Send` (Convidado → Host) e `Chat`,
 //!    `ParticipantJoined`, `ParticipantLeft`, `Rejected`, `RoomClosed`
 //!    (Host → Convidados).
 //!
@@ -52,8 +52,11 @@ pub enum Message {
     ParticipantJoined { participant: Participant },
     /// Host → todos: alguém saiu.
     ParticipantLeft { participant: Participant },
-    /// Convidado → Host: "publique esta mensagem".
-    SendMessage { text: String },
+    /// Convidado → Host: "publique esta mensagem". (No fio continua se chamando
+    /// `send_message`, como no SPEC.md; em Rust é `Send` para não repetir
+    /// "Message" do nome do enum, o que o clippy desaconselha.)
+    #[serde(rename = "send_message")]
+    Send { text: String },
     /// Host → todos (inclusive o autor, como confirmação): mensagem oficial,
     /// já com número e horário do Host.
     Chat { message: ChatMessage },
@@ -73,7 +76,7 @@ mod tests {
 
     #[test]
     fn mensagem_vira_json_legivel() {
-        let json = serde_json::to_string(&Message::SendMessage { text: "oi".into() }).unwrap();
+        let json = serde_json::to_string(&Message::Send { text: "oi".into() }).unwrap();
         assert_eq!(json, r#"{"type":"send_message","text":"oi"}"#);
         let json = serde_json::to_string(&Message::RoomClosed).unwrap();
         assert_eq!(json, r#"{"type":"room_closed"}"#);

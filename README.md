@@ -11,7 +11,7 @@ Uma pessoa (o **Host**) cria uma sala no próprio computador; outras pessoas (**
 | Fase | Descrição | Situação |
 |---|---|---|
 | 1 | Setup: Tauri 2 + React/TS/Vite/Tailwind, CI para os 3 sistemas | ✅ |
-| 2 | Rede básica com iroh (Host ↔ Convidado, ping) | ✅ falta teste manual em redes diferentes |
+| 2 | Rede básica com iroh (Host ↔ Convidado, ping) | ✅ testado em redes diferentes |
 | 3 | Senha: Argon2id + SPAKE2, limite de tentativas | ⏳ |
 | 4 | Sala e chat: protocolo, histórico, participantes | ⏳ |
 | 5 | Interface completa | ⏳ |
